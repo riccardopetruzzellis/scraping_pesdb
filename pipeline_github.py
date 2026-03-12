@@ -1,0 +1,127 @@
+import argparse
+import json
+from pathlib import Path
+
+import pandas as pd
+
+from scraping_pesdb_unificato import (
+    CHUNK_SIZE,
+    DEFAULT_EXCLUDED_COLUMNS,
+    FINAL_JSON_FILE,
+    FINAL_META_FILE,
+    OUTPUT_DIR,
+    PAGE_LOG_FILE,
+    RAW_IDS_FILE,
+    build_metadata,
+    build_session,
+    extract_all_player_ids,
+    extract_player_details,
+    load_custom_rules,
+    load_json,
+    save_json,
+    split_into_chunks,
+    transform_dataframe,
+)
+
+
+CHUNKS_DIR = OUTPUT_DIR / "chunks"
+MERGED_DIR = OUTPUT_DIR / "merged"
+
+
+def prepare(end_page, chunk_size):
+    player_ids, page_logs = extract_all_player_ids(1, end_page)
+    RAW_IDS_FILE.write_text("\n".join(player_ids), encoding="utf-8")
+    pd.DataFrame(page_logs).to_excel(PAGE_LOG_FILE, index=False)
+
+    chunk_map = []
+    CHUNKS_DIR.mkdir(parents=True, exist_ok=True)
+    for index, chunk_ids in enumerate(split_into_chunks(player_ids, chunk_size)):
+        chunk_file = CHUNKS_DIR / f"ids_chunk_{index:03d}.json"
+        save_json(chunk_file, chunk_ids)
+        chunk_map.append({"chunk_index": index, "ids_file": chunk_file.name, "count": len(chunk_ids)})
+
+    save_json(OUTPUT_DIR / "chunks_manifest.json", chunk_map)
+    print(json.dumps({"chunks": chunk_map, "count": len(chunk_map)}))
+
+
+def process_chunk(chunk_index):
+    manifest = load_json(OUTPUT_DIR / "chunks_manifest.json", [])
+    chunk_info = next(item for item in manifest if item["chunk_index"] == chunk_index)
+    chunk_ids = load_json(CHUNKS_DIR / chunk_info["ids_file"], [])
+
+    session = build_session()
+    players = []
+    errors = []
+    for idx, player_id in enumerate(chunk_ids, start=1):
+        print(f"[CHUNK {chunk_index}] {idx}/{len(chunk_ids)} player {player_id}")
+        try:
+            players.append(extract_player_details(session, player_id))
+        except Exception as exc:
+            errors.append({"player_id": player_id, "error": str(exc)})
+
+    chunk_payload = {
+        "chunk_index": chunk_index,
+        "players": players,
+        "errors": errors,
+        "requested_ids": chunk_ids,
+    }
+    save_json(CHUNKS_DIR / f"players_chunk_{chunk_index:03d}.json", chunk_payload)
+
+
+def merge(push_to_github):
+    custom_column_names, custom_translations, file_excluded_columns = load_custom_rules()
+    effective_excluded_columns = set(DEFAULT_EXCLUDED_COLUMNS) | file_excluded_columns
+    manifest = load_json(OUTPUT_DIR / "chunks_manifest.json", [])
+
+    merged_players = []
+    merged_errors = []
+    all_ids = []
+    for item in manifest:
+        chunk_payload = load_json(CHUNKS_DIR / f"players_chunk_{item['chunk_index']:03d}.json", {})
+        merged_players.extend(chunk_payload.get("players", []))
+        merged_errors.extend(chunk_payload.get("errors", []))
+        all_ids.extend(chunk_payload.get("requested_ids", []))
+
+    raw_df = pd.DataFrame(merged_players)
+    MERGED_DIR.mkdir(parents=True, exist_ok=True)
+    raw_df.to_csv(MERGED_DIR / "pesdb_players_raw.csv", index=False, encoding="utf-8-sig")
+
+    final_df = transform_dataframe(raw_df, effective_excluded_columns, custom_column_names, custom_translations)
+    final_df.to_json(FINAL_JSON_FILE, orient="records", force_ascii=False, indent=2)
+
+    metadata = build_metadata(final_df, [], all_ids)
+    metadata["chunk_count"] = len(manifest)
+    metadata["errors"] = merged_errors
+    FINAL_META_FILE.write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    if push_to_github:
+        from scraping_pesdb_unificato import push_outputs_to_github
+
+        push_outputs_to_github()
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    prepare_parser = subparsers.add_parser("prepare")
+    prepare_parser.add_argument("--end-page", type=int, default=None)
+    prepare_parser.add_argument("--chunk-size", type=int, default=CHUNK_SIZE)
+
+    chunk_parser = subparsers.add_parser("process-chunk")
+    chunk_parser.add_argument("--chunk-index", type=int, required=True)
+
+    merge_parser = subparsers.add_parser("merge")
+    merge_parser.add_argument("--push-to-github", action="store_true")
+
+    args = parser.parse_args()
+    if args.command == "prepare":
+        prepare(args.end_page, args.chunk_size)
+    elif args.command == "process-chunk":
+        process_chunk(args.chunk_index)
+    elif args.command == "merge":
+        merge(args.push_to_github)
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,134 @@
+name: Weekly Chunked PESDB Scrape
+
+on:
+  schedule:
+    - cron: "0 2 * * 0"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.manifest.outputs.matrix }}
+      chunk_count: ${{ steps.manifest.outputs.chunk_count }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        working-directory: pesdb-render-repo
+        run: pip install -r requirements.txt
+
+      - name: Prepare chunks
+        working-directory: pesdb-render-repo
+        run: python pipeline_github.py prepare
+
+      - name: Export matrix
+        id: manifest
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          manifest = json.loads(Path("pesdb-render-repo/output/chunks_manifest.json").read_text(encoding="utf-8"))
+          matrix = {"include": [{"chunk_index": item["chunk_index"]} for item in manifest]}
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as handle:
+              handle.write(f"matrix={json.dumps(matrix)}\n")
+              handle.write(f"chunk_count={len(manifest)}\n")
+          PY
+
+      - name: Upload prepared data
+        uses: actions/upload-artifact@v4
+        with:
+          name: prepared-data
+          path: |
+            pesdb-render-repo/output/chunks_manifest.json
+            pesdb-render-repo/output/chunks/ids_chunk_*.json
+            pesdb-render-repo/output/player_ids.txt
+            pesdb-render-repo/output/log_pagine.xlsx
+
+  process-chunks:
+    needs: prepare
+    if: ${{ needs.prepare.outputs.chunk_count != '0' }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      max-parallel: 6
+      matrix: ${{ fromJson(needs.prepare.outputs.matrix) }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        working-directory: pesdb-render-repo
+        run: pip install -r requirements.txt
+
+      - name: Download prepared data
+        uses: actions/download-artifact@v4
+        with:
+          name: prepared-data
+          path: pesdb-render-repo
+
+      - name: Process chunk
+        working-directory: pesdb-render-repo
+        run: python pipeline_github.py process-chunk --chunk-index ${{ matrix.chunk_index }}
+
+      - name: Upload chunk result
+        uses: actions/upload-artifact@v4
+        with:
+          name: chunk-${{ matrix.chunk_index }}
+          path: pesdb-render-repo/output/chunks/players_chunk_${{ format('{0:000}', matrix.chunk_index) }}.json
+
+  merge:
+    needs: [prepare, process-chunks]
+    if: ${{ always() && needs.prepare.outputs.chunk_count != '0' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        working-directory: pesdb-render-repo
+        run: pip install -r requirements.txt
+
+      - name: Download prepared data
+        uses: actions/download-artifact@v4
+        with:
+          name: prepared-data
+          path: pesdb-render-repo
+
+      - name: Download all chunk results
+        uses: actions/download-artifact@v4
+        with:
+          pattern: chunk-*
+          path: pesdb-render-repo
+          merge-multiple: true
+
+      - name: Merge and push
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_BRANCH: ${{ github.ref_name }}
+          GITHUB_JSON_PATH: data/pesdb_players_it.json
+          GITHUB_META_PATH: data/pesdb_players_meta.json
+        working-directory: pesdb-render-repo
+        run: python pipeline_github.py merge --push-to-github
