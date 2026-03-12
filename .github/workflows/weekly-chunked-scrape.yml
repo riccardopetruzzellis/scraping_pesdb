@@ -78,7 +78,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: prepared-data
-          path: .
+          path: output
 
       - name: Process chunk
         run: python pipeline_github.py process-chunk --chunk-index ${{ matrix.chunk_index }}
@@ -109,13 +109,13 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: prepared-data
-          path: .
+          path: output
 
       - name: Download all chunk results
         uses: actions/download-artifact@v4
         with:
           pattern: chunk-*
-          path: .
+          path: output/chunks
           merge-multiple: true
 
       - name: Merge and push
