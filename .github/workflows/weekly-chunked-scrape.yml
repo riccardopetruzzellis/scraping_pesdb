@@ -83,11 +83,17 @@ jobs:
       - name: Process chunk
         run: python pipeline_github.py process-chunk --chunk-index ${{ matrix.chunk_index }}
 
+      - name: Stage chunk artifact
+        shell: bash
+        run: |
+          mkdir -p artifact
+          cp output/chunks/players_chunk_*.json artifact/
+
       - name: Upload chunk result
         uses: actions/upload-artifact@v4
         with:
           name: chunk-${{ matrix.chunk_index }}
-          path: output/chunks/
+          path: artifact/
 
   merge:
     needs: [prepare, process-chunks]
@@ -115,7 +121,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           pattern: chunk-*
-          path: .
+          path: output/chunks
           merge-multiple: true
 
       - name: Merge and push
