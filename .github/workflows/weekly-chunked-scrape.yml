@@ -87,7 +87,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: chunk-${{ matrix.chunk_index }}
-          path: output/chunks/players_chunk_${{ format('{0:000}', matrix.chunk_index) }}.json
+          path: output/chunks/players_chunk_*.json
 
   merge:
     needs: [prepare, process-chunks]
