@@ -24,6 +24,8 @@ SAVE_EVERY = 50
 REQUEST_TIMEOUT = 20
 MAX_EMPTY_PAGES = 2
 CHUNK_SIZE = 250
+DETAIL_RETRY_ATTEMPTS = 4
+DETAIL_RETRY_BASE_SECONDS = 8
 
 OUTPUT_DIR = Path(__file__).resolve().parent / "output"
 MODIFICATIONS_FILE = Path(__file__).resolve().parent / "file_modifiche.xlsx"
@@ -31,6 +33,7 @@ MODIFICATIONS_SHEET = "Regole"
 RAW_IDS_FILE = OUTPUT_DIR / "player_ids.txt"
 RAW_CSV_FILE = OUTPUT_DIR / "pesdb_players_raw.csv"
 FINAL_JSON_FILE = OUTPUT_DIR / "pesdb_players_it.json"
+FINAL_CSV_FILE = OUTPUT_DIR / "pesdb_players_it.csv"
 FINAL_META_FILE = OUTPUT_DIR / "pesdb_players_meta.json"
 PAGE_LOG_FILE = OUTPUT_DIR / "log_pagine.xlsx"
 RUN_LOG_FILE = OUTPUT_DIR / "log_errori.txt"
@@ -42,6 +45,7 @@ DEFAULT_EXCLUDED_COLUMNS = {
     "Forum code:",
     "Facebook:",
     "Twitter:",
+    "Region:",
 }
 
 COLUMN_TRANSLATIONS = {
@@ -283,6 +287,29 @@ def extract_player_details(session, player_id):
     return player_data
 
 
+def extract_player_details_with_retry(session, player_id, max_attempts=DETAIL_RETRY_ATTEMPTS):
+    last_error = None
+    for attempt in range(1, max_attempts + 1):
+        try:
+            return extract_player_details(session, player_id)
+        except requests.HTTPError as exc:
+            last_error = exc
+            status_code = exc.response.status_code if exc.response is not None else None
+            if status_code not in {429, 500, 502, 503, 504}:
+                raise
+        except requests.RequestException as exc:
+            last_error = exc
+
+        if attempt == max_attempts:
+            break
+
+        sleep_seconds = DETAIL_RETRY_BASE_SECONDS * attempt
+        print(f"[RETRY] player {player_id} tentativo {attempt}/{max_attempts} fallito, attendo {sleep_seconds}s")
+        time.sleep(sleep_seconds)
+
+    raise last_error
+
+
 def translate_scalar(value):
     if pd.isna(value):
         return value
@@ -433,6 +460,7 @@ def build_metadata(final_df, page_logs, player_ids):
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "players_count": int(len(final_df)),
         "player_ids_count": int(len(player_ids)),
+        "missing_players_count": int(max(len(player_ids) - len(final_df), 0)),
         "pages_processed": int(len(page_logs)),
         "columns": list(final_df.columns),
         "empty_by_column": empty_by_column,
@@ -541,7 +569,7 @@ def run(start_page, end_page, excluded_columns):
     for index, player_id in enumerate(player_ids, start=1):
         print(f"[DETTAGLIO] {index}/{total} player {player_id}")
         try:
-            all_players.append(extract_player_details(session, player_id))
+            all_players.append(extract_player_details_with_retry(session, player_id))
         except Exception as exc:
             error_message = f"Player {player_id}: {exc}"
             print(f"[ERRORE] {error_message}")
@@ -559,6 +587,7 @@ def run(start_page, end_page, excluded_columns):
 
     final_df = transform_dataframe(raw_df, effective_excluded_columns, custom_column_names, custom_translations)
     final_df.to_json(FINAL_JSON_FILE, orient="records", force_ascii=False, indent=2)
+    final_df.to_csv(FINAL_CSV_FILE, index=False, encoding="utf-8-sig")
     metadata = build_metadata(final_df, page_logs, player_ids)
     FINAL_META_FILE.write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
     push_outputs_to_github()

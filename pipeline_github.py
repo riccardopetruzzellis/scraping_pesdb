@@ -7,6 +7,7 @@ import pandas as pd
 from scraping_pesdb_unificato import (
     CHUNK_SIZE,
     DEFAULT_EXCLUDED_COLUMNS,
+    FINAL_CSV_FILE,
     FINAL_JSON_FILE,
     FINAL_META_FILE,
     OUTPUT_DIR,
@@ -15,7 +16,7 @@ from scraping_pesdb_unificato import (
     build_metadata,
     build_session,
     extract_all_player_ids,
-    extract_player_details,
+    extract_player_details_with_retry,
     load_custom_rules,
     load_json,
     save_json,
@@ -57,7 +58,7 @@ def process_chunk(chunk_index):
     for idx, player_id in enumerate(chunk_ids, start=1):
         print(f"[CHUNK {chunk_index}] {idx}/{len(chunk_ids)} player {player_id}")
         try:
-            players.append(extract_player_details(session, player_id))
+            players.append(extract_player_details_with_retry(session, player_id))
         except Exception as exc:
             errors.append({"player_id": player_id, "error": str(exc)})
 
@@ -103,10 +104,18 @@ def merge(push_to_github):
 
     final_df = transform_dataframe(raw_df, effective_excluded_columns, custom_column_names, custom_translations)
     final_df.to_json(FINAL_JSON_FILE, orient="records", force_ascii=False, indent=2)
+    final_df.to_csv(FINAL_CSV_FILE, index=False, encoding="utf-8-sig")
 
     metadata = build_metadata(final_df, [], all_ids)
     metadata["chunk_count"] = len(manifest)
     metadata["errors"] = merged_errors
+    metadata["expected_player_ids"] = len(all_ids)
+    metadata["extracted_players"] = len(final_df)
+    metadata["missing_players_count"] = max(len(all_ids) - len(final_df), 0)
+    if len(final_df) < len(all_ids):
+        raise RuntimeError(
+            f"Giocatori mancanti nel merge: estratti {len(final_df)} su {len(all_ids)} ID attesi"
+        )
     FINAL_META_FILE.write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
 
     if push_to_github:
