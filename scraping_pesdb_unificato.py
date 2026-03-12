@@ -17,8 +17,8 @@ from bs4 import BeautifulSoup
 BASE_URL = "https://pesdb.net/efootball/"
 START_PAGE = 1
 END_PAGE = None
-LIST_SLEEP_MIN = 1
-LIST_SLEEP_MAX = 2
+LIST_SLEEP_MIN = 0.2
+LIST_SLEEP_MAX = 0.6
 DETAIL_SLEEP_SECONDS = 4
 SAVE_EVERY = 50
 REQUEST_TIMEOUT = 20
