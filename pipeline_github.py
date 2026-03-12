@@ -75,15 +75,27 @@ def merge(push_to_github):
     custom_column_names, custom_translations, file_excluded_columns = load_custom_rules()
     effective_excluded_columns = set(DEFAULT_EXCLUDED_COLUMNS) | file_excluded_columns
     manifest = load_json(OUTPUT_DIR / "chunks_manifest.json", [])
+    if not manifest:
+        raise RuntimeError("chunks_manifest.json non trovato o vuoto")
 
     merged_players = []
     merged_errors = []
     all_ids = []
+    missing_chunks = []
     for item in manifest:
-        chunk_payload = load_json(CHUNKS_DIR / f"players_chunk_{item['chunk_index']:03d}.json", {})
+        chunk_file = CHUNKS_DIR / f"players_chunk_{item['chunk_index']:03d}.json"
+        if not chunk_file.exists():
+            missing_chunks.append(chunk_file.name)
+            continue
+        chunk_payload = load_json(chunk_file, {})
         merged_players.extend(chunk_payload.get("players", []))
         merged_errors.extend(chunk_payload.get("errors", []))
         all_ids.extend(chunk_payload.get("requested_ids", []))
+
+    if missing_chunks:
+        raise RuntimeError(f"Chunk mancanti nel merge: {len(missing_chunks)}. Esempi: {missing_chunks[:5]}")
+    if not merged_players:
+        raise RuntimeError("Nessun giocatore trovato nei chunk elaborati")
 
     raw_df = pd.DataFrame(merged_players)
     MERGED_DIR.mkdir(parents=True, exist_ok=True)

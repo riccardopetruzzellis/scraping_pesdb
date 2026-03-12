@@ -87,7 +87,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: chunk-${{ matrix.chunk_index }}
-          path: output/chunks/players_chunk_*.json
+          path: output/chunks/
 
   merge:
     needs: [prepare, process-chunks]
@@ -115,7 +115,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           pattern: chunk-*
-          path: output/chunks
+          path: .
           merge-multiple: true
 
       - name: Merge and push
