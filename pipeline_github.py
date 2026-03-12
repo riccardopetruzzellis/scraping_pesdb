@@ -29,6 +29,7 @@ MERGED_DIR = OUTPUT_DIR / "merged"
 
 
 def prepare(end_page, chunk_size):
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     player_ids, page_logs = extract_all_player_ids(1, end_page)
     RAW_IDS_FILE.write_text("\n".join(player_ids), encoding="utf-8")
     pd.DataFrame(page_logs).to_excel(PAGE_LOG_FILE, index=False)
@@ -45,6 +46,7 @@ def prepare(end_page, chunk_size):
 
 
 def process_chunk(chunk_index):
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     manifest = load_json(OUTPUT_DIR / "chunks_manifest.json", [])
     chunk_info = next(item for item in manifest if item["chunk_index"] == chunk_index)
     chunk_ids = load_json(CHUNKS_DIR / chunk_info["ids_file"], [])
@@ -69,6 +71,7 @@ def process_chunk(chunk_index):
 
 
 def merge(push_to_github):
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     custom_column_names, custom_translations, file_excluded_columns = load_custom_rules()
     effective_excluded_columns = set(DEFAULT_EXCLUDED_COLUMNS) | file_excluded_columns
     manifest = load_json(OUTPUT_DIR / "chunks_manifest.json", [])
