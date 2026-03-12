@@ -6,6 +6,8 @@ import pandas as pd
 
 from scraping_pesdb_unificato import (
     CHUNK_SIZE,
+    CHUNK_COOLDOWN_EVERY,
+    CHUNK_COOLDOWN_SECONDS,
     DEFAULT_EXCLUDED_COLUMNS,
     FINAL_CSV_FILE,
     FINAL_JSON_FILE,
@@ -24,6 +26,7 @@ from scraping_pesdb_unificato import (
     split_into_chunks,
     transform_dataframe,
 )
+import time
 
 
 CHUNKS_DIR = OUTPUT_DIR / "chunks"
@@ -57,6 +60,10 @@ def process_chunk(chunk_index):
     players = []
     errors = []
     for idx, player_id in enumerate(chunk_ids, start=1):
+        if idx > 1 and (idx - 1) % CHUNK_COOLDOWN_EVERY == 0:
+            print(f"[CHUNK {chunk_index}] cooldown dopo {idx - 1} player, attendo {CHUNK_COOLDOWN_SECONDS}s e resetto la sessione")
+            time.sleep(CHUNK_COOLDOWN_SECONDS)
+            session = build_session()
         print(f"[CHUNK {chunk_index}] {idx}/{len(chunk_ids)} player {player_id}")
         try:
             players.append(extract_player_details_with_retry(session, player_id))
