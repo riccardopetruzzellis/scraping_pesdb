@@ -26,6 +26,7 @@ MAX_EMPTY_PAGES = 2
 CHUNK_SIZE = 250
 DETAIL_RETRY_ATTEMPTS = 4
 DETAIL_RETRY_BASE_SECONDS = 8
+FINAL_RECOVERY_SLEEP_SECONDS = 12
 
 OUTPUT_DIR = Path(__file__).resolve().parent / "output"
 MODIFICATIONS_FILE = Path(__file__).resolve().parent / "file_modifiche.xlsx"
@@ -549,6 +550,25 @@ def push_outputs_to_github():
         f"Update PESDB metadata - {timestamp}",
     )
     print(f"[GITHUB] File aggiornati su {repo}@{branch}")
+
+
+def recover_missing_players(player_ids):
+    if not player_ids:
+        return [], []
+
+    session = build_session()
+    recovered_players = []
+    recovery_errors = []
+
+    for index, player_id in enumerate(player_ids, start=1):
+        print(f"[RECOVERY] {index}/{len(player_ids)} player {player_id}")
+        try:
+            recovered_players.append(extract_player_details_with_retry(session, player_id))
+        except Exception as exc:
+            recovery_errors.append({"player_id": player_id, "error": str(exc)})
+        time.sleep(FINAL_RECOVERY_SLEEP_SECONDS)
+
+    return recovered_players, recovery_errors
 
 
 def run(start_page, end_page, excluded_columns):

@@ -19,6 +19,7 @@ from scraping_pesdb_unificato import (
     extract_player_details_with_retry,
     load_custom_rules,
     load_json,
+    recover_missing_players,
     save_json,
     split_into_chunks,
     transform_dataframe,
@@ -82,6 +83,7 @@ def merge(push_to_github):
     merged_players = []
     merged_errors = []
     all_ids = []
+    failed_player_ids = []
     missing_chunks = []
     for item in manifest:
         chunk_file = CHUNKS_DIR / f"players_chunk_{item['chunk_index']:03d}.json"
@@ -92,11 +94,23 @@ def merge(push_to_github):
         merged_players.extend(chunk_payload.get("players", []))
         merged_errors.extend(chunk_payload.get("errors", []))
         all_ids.extend(chunk_payload.get("requested_ids", []))
+        failed_player_ids.extend(error["player_id"] for error in chunk_payload.get("errors", []))
 
     if missing_chunks:
         raise RuntimeError(f"Chunk mancanti nel merge: {len(missing_chunks)}. Esempi: {missing_chunks[:5]}")
     if not merged_players:
         raise RuntimeError("Nessun giocatore trovato nei chunk elaborati")
+
+    if failed_player_ids:
+        print(f"[RECOVERY] Avvio recupero finale per {len(failed_player_ids)} player falliti nei chunk")
+        recovered_players, recovery_errors = recover_missing_players(failed_player_ids)
+        merged_players.extend(recovered_players)
+        merged_errors.extend(recovery_errors)
+
+    unique_players = {}
+    for player in merged_players:
+        unique_players[str(player.get("player_id"))] = player
+    merged_players = list(unique_players.values())
 
     raw_df = pd.DataFrame(merged_players)
     MERGED_DIR.mkdir(parents=True, exist_ok=True)
