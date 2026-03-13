@@ -69,7 +69,15 @@ def fetch_previous_repo_json(repo_path):
     response.raise_for_status()
     payload = response.json()
     content = base64.b64decode(payload["content"]).decode("utf-8")
-    return json.loads(content)
+    content = content.strip()
+    if not content:
+        return []
+    try:
+        parsed = json.loads(content)
+    except json.JSONDecodeError:
+        print(f"[DIFF] Snapshot precedente non valido in {repo_path}, confronto saltato")
+        return []
+    return parsed if isinstance(parsed, list) else []
 
 
 def prepare(end_page, chunk_size):
