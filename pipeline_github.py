@@ -1,20 +1,27 @@
 import argparse
+import base64
 import json
+import os
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pandas as pd
+import requests
 
 from scraping_pesdb_unificato import (
     CHUNK_SIZE,
     CHUNK_COOLDOWN_EVERY,
     CHUNK_COOLDOWN_SECONDS,
     DEFAULT_EXCLUDED_COLUMNS,
+    FINAL_DIFF_FILE,
     FINAL_CSV_FILE,
     FINAL_JSON_FILE,
     FINAL_META_FILE,
+    REQUEST_TIMEOUT,
     OUTPUT_DIR,
     PAGE_LOG_FILE,
     RAW_IDS_FILE,
+    build_diff,
     build_metadata,
     build_session,
     extract_all_player_ids,
@@ -31,6 +38,38 @@ import time
 
 CHUNKS_DIR = OUTPUT_DIR / "chunks"
 MERGED_DIR = OUTPUT_DIR / "merged"
+
+
+def github_request_session():
+    token = os.getenv("GITHUB_TOKEN")
+    if not token:
+        return None
+    session = requests.Session()
+    session.headers.update(
+        {
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/vnd.github+json",
+            "User-Agent": "pesdb-github-actions",
+        }
+    )
+    return session
+
+
+def fetch_previous_repo_json(repo_path):
+    repo = os.getenv("GITHUB_REPOSITORY")
+    branch = os.getenv("GITHUB_BRANCH", "main")
+    session = github_request_session()
+    if not repo or not session:
+        return []
+    owner, repo_name = repo.split("/", 1)
+    url = f"https://api.github.com/repos/{owner}/{repo_name}/contents/{repo_path}"
+    response = session.get(url, params={"ref": branch}, timeout=REQUEST_TIMEOUT)
+    if response.status_code == 404:
+        return []
+    response.raise_for_status()
+    payload = response.json()
+    content = base64.b64decode(payload["content"]).decode("utf-8")
+    return json.loads(content)
 
 
 def prepare(end_page, chunk_size):
@@ -126,6 +165,10 @@ def merge(push_to_github):
     final_df = transform_dataframe(raw_df, effective_excluded_columns, custom_column_names, custom_translations)
     final_df.to_json(FINAL_JSON_FILE, orient="records", force_ascii=False, indent=2)
     final_df.to_csv(FINAL_CSV_FILE, index=False, encoding="utf-8-sig")
+    current_players = json.loads(FINAL_JSON_FILE.read_text(encoding="utf-8"))
+    previous_players = fetch_previous_repo_json(os.getenv("GITHUB_JSON_PATH", "data/pesdb_players_it.json"))
+    diff_payload = build_diff(previous_players, current_players)
+    FINAL_DIFF_FILE.write_text(json.dumps(diff_payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
     metadata = build_metadata(final_df, [], all_ids)
     metadata["chunk_count"] = len(manifest)
@@ -133,6 +176,13 @@ def merge(push_to_github):
     metadata["expected_player_ids"] = len(all_ids)
     metadata["extracted_players"] = len(final_df)
     metadata["missing_players_count"] = max(len(all_ids) - len(final_df), 0)
+    metadata.update(
+        {
+            "added_players_count": diff_payload["added_players_count"],
+            "removed_players_count": diff_payload["removed_players_count"],
+            "changed_players_count": diff_payload["changed_players_count"],
+        }
+    )
     if len(final_df) < len(all_ids):
         raise RuntimeError(
             f"Giocatori mancanti nel merge: estratti {len(final_df)} su {len(all_ids)} ID attesi"

@@ -38,6 +38,7 @@ RAW_CSV_FILE = OUTPUT_DIR / "pesdb_players_raw.csv"
 FINAL_JSON_FILE = OUTPUT_DIR / "pesdb_players_it.json"
 FINAL_CSV_FILE = OUTPUT_DIR / "pesdb_players_it.csv"
 FINAL_META_FILE = OUTPUT_DIR / "pesdb_players_meta.json"
+FINAL_DIFF_FILE = OUTPUT_DIR / "pesdb_players_diff.json"
 PAGE_LOG_FILE = OUTPUT_DIR / "log_pagine.xlsx"
 RUN_LOG_FILE = OUTPUT_DIR / "log_errori.txt"
 
@@ -486,6 +487,50 @@ def load_json(path, default):
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def index_players_by_id(players):
+    indexed = {}
+    for player in players:
+        player_id = str(player.get("pesdb_id") or player.get("player_id") or "").strip()
+        if player_id:
+            indexed[player_id] = player
+    return indexed
+
+
+def build_diff(previous_players, current_players):
+    previous_index = index_players_by_id(previous_players)
+    current_index = index_players_by_id(current_players)
+
+    previous_ids = set(previous_index)
+    current_ids = set(current_index)
+
+    added_ids = sorted(current_ids - previous_ids)
+    removed_ids = sorted(previous_ids - current_ids)
+    common_ids = sorted(previous_ids & current_ids)
+
+    changed_players = []
+    for player_id in common_ids:
+        old_player = previous_index[player_id]
+        new_player = current_index[player_id]
+        changed_fields = {}
+        all_keys = sorted(set(old_player) | set(new_player))
+        for key in all_keys:
+            old_value = old_player.get(key)
+            new_value = new_player.get(key)
+            if old_value != new_value:
+                changed_fields[key] = {"old": old_value, "new": new_value}
+        if changed_fields:
+            changed_players.append({"player_id": player_id, "changes": changed_fields})
+
+    return {
+        "added_players_count": len(added_ids),
+        "removed_players_count": len(removed_ids),
+        "changed_players_count": len(changed_players),
+        "added_player_ids": added_ids,
+        "removed_player_ids": removed_ids,
+        "changed_players": changed_players,
+    }
+
+
 def get_github_file_sha(session, owner, repo, branch, path):
     url = f"https://api.github.com/repos/{owner}/{repo}/contents/{path}"
     response = session.get(url, params={"ref": branch}, timeout=REQUEST_TIMEOUT)
@@ -517,6 +562,8 @@ def push_outputs_to_github():
     branch = os.getenv("GITHUB_BRANCH", "main")
     json_path = os.getenv("GITHUB_JSON_PATH", "data/pesdb_players_it.json")
     meta_path = os.getenv("GITHUB_META_PATH", "data/pesdb_players_meta.json")
+    diff_path = os.getenv("GITHUB_DIFF_PATH", "data/pesdb_players_diff.json")
+    csv_path = os.getenv("GITHUB_CSV_PATH", "data/pesdb_players_it.csv")
 
     if not token or not repo:
         print("[GITHUB] Push saltato: variabili GITHUB_TOKEN o GITHUB_REPOSITORY mancanti")
@@ -533,6 +580,8 @@ def push_outputs_to_github():
     )
 
     timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+    version_stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    version_dir = f"data/history/{version_stamp}"
     push_file_to_github(
         session,
         owner,
@@ -550,6 +599,60 @@ def push_outputs_to_github():
         FINAL_META_FILE,
         meta_path,
         f"Update PESDB metadata - {timestamp}",
+    )
+    push_file_to_github(
+        session,
+        owner,
+        repo_name,
+        branch,
+        FINAL_DIFF_FILE,
+        diff_path,
+        f"Update PESDB diff - {timestamp}",
+    )
+    push_file_to_github(
+        session,
+        owner,
+        repo_name,
+        branch,
+        FINAL_CSV_FILE,
+        csv_path,
+        f"Update PESDB CSV - {timestamp}",
+    )
+    push_file_to_github(
+        session,
+        owner,
+        repo_name,
+        branch,
+        FINAL_JSON_FILE,
+        f"{version_dir}/pesdb_players_it.json",
+        f"Archive PESDB JSON - {timestamp}",
+    )
+    push_file_to_github(
+        session,
+        owner,
+        repo_name,
+        branch,
+        FINAL_META_FILE,
+        f"{version_dir}/pesdb_players_meta.json",
+        f"Archive PESDB metadata - {timestamp}",
+    )
+    push_file_to_github(
+        session,
+        owner,
+        repo_name,
+        branch,
+        FINAL_DIFF_FILE,
+        f"{version_dir}/pesdb_players_diff.json",
+        f"Archive PESDB diff - {timestamp}",
+    )
+    push_file_to_github(
+        session,
+        owner,
+        repo_name,
+        branch,
+        FINAL_CSV_FILE,
+        f"{version_dir}/pesdb_players_it.csv",
+        f"Archive PESDB CSV - {timestamp}",
     )
     print(f"[GITHUB] File aggiornati su {repo}@{branch}")
 

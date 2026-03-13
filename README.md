@@ -87,7 +87,10 @@ Flusso:
 3. piu' job GitHub processano i chunk in parallelo;
 4. un job finale unisce tutto e aggiorna:
    - `data/pesdb_players_it.json`
+   - `data/pesdb_players_it.csv`
    - `data/pesdb_players_meta.json`
+   - `data/pesdb_players_diff.json`
+   - `data/history/YYYY-MM-DD/...` per conservare ogni versione
 
 Workflow:
 
@@ -108,6 +111,7 @@ Il file `pesdb_players_meta.json` contiene:
 - elenco colonne
 - numero celle vuote per colonna
 - flag presenza errori
+- numero giocatori aggiunti/rimossi/modificati rispetto al run precedente
 
 Questo file serve per mostrare nell'app pubblicata se il run e' andato bene.
 
