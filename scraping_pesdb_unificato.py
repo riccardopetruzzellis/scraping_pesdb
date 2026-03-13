@@ -580,7 +580,9 @@ def push_outputs_to_github():
 
     timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
     version_stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    extraction_stamp = datetime.now(timezone.utc).strftime("%d_%m_%Y")
     version_dir = f"data/history/{version_stamp}"
+    dated_json_path = f"data/estrazione_{extraction_stamp}.json"
     push_file_to_github(
         session,
         owner,
@@ -589,6 +591,15 @@ def push_outputs_to_github():
         FINAL_JSON_FILE,
         json_path,
         f"Update PESDB JSON - {timestamp}",
+    )
+    push_file_to_github(
+        session,
+        owner,
+        repo_name,
+        branch,
+        FINAL_JSON_FILE,
+        dated_json_path,
+        f"Archive PESDB dated JSON - {timestamp}",
     )
     push_file_to_github(
         session,
