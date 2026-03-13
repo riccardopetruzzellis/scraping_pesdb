@@ -49,7 +49,6 @@ DEFAULT_EXCLUDED_COLUMNS = {
     "Forum code:",
     "Facebook:",
     "Twitter:",
-    "Region:",
 }
 
 COLUMN_TRANSLATIONS = {
