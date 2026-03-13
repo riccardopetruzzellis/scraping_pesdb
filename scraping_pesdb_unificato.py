@@ -579,9 +579,7 @@ def push_outputs_to_github():
     )
 
     timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
-    version_stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     extraction_stamp = datetime.now(timezone.utc).strftime("%d_%m_%Y")
-    version_dir = f"data/history/{version_stamp}"
     dated_json_path = f"data/estrazione_{extraction_stamp}.json"
     push_file_to_github(
         session,
@@ -627,42 +625,6 @@ def push_outputs_to_github():
         FINAL_CSV_FILE,
         csv_path,
         f"Update PESDB CSV - {timestamp}",
-    )
-    push_file_to_github(
-        session,
-        owner,
-        repo_name,
-        branch,
-        FINAL_JSON_FILE,
-        f"{version_dir}/pesdb_players_it.json",
-        f"Archive PESDB JSON - {timestamp}",
-    )
-    push_file_to_github(
-        session,
-        owner,
-        repo_name,
-        branch,
-        FINAL_META_FILE,
-        f"{version_dir}/pesdb_players_meta.json",
-        f"Archive PESDB metadata - {timestamp}",
-    )
-    push_file_to_github(
-        session,
-        owner,
-        repo_name,
-        branch,
-        FINAL_DIFF_FILE,
-        f"{version_dir}/pesdb_players_diff.json",
-        f"Archive PESDB diff - {timestamp}",
-    )
-    push_file_to_github(
-        session,
-        owner,
-        repo_name,
-        branch,
-        FINAL_CSV_FILE,
-        f"{version_dir}/pesdb_players_it.csv",
-        f"Archive PESDB CSV - {timestamp}",
     )
     print(f"[GITHUB] File aggiornati su {repo}@{branch}")
 
