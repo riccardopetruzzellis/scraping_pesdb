@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-03-13T16:57:59.725499+00:00",
+  "generated_at": "2026-03-16T20:56:43.906376+00:00",
   "players_count": 18580,
   "player_ids_count": 18580,
   "missing_players_count": 0,
@@ -10,6 +10,7 @@
     "real_team_code",
     "league",
     "nation",
+    "region",
     "height",
     "weight",
     "age",
@@ -62,6 +63,7 @@
     "real_team_code": 0,
     "league": 0,
     "nation": 0,
+    "region": 0,
     "height": 0,
     "weight": 0,
     "age": 0,
@@ -110,7 +112,12 @@
   },
   "has_errors": false,
   "chunk_count": 93,
-  "errors": [],
+  "errors": [
+    {
+      "player_id": "121654",
+      "error": "429 Client Error: Too Many Requests for url: https://pesdb.net/efootball/?id=121654"
+    }
+  ],
   "expected_player_ids": 18580,
   "extracted_players": 18580,
   "added_players_count": 18580,
