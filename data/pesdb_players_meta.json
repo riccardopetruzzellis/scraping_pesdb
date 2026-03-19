@@ -1,7 +1,7 @@
 {
-  "generated_at": "2026-03-16T20:56:43.906376+00:00",
-  "players_count": 18580,
-  "player_ids_count": 18580,
+  "generated_at": "2026-03-19T18:23:50.090298+00:00",
+  "players_count": 18717,
+  "player_ids_count": 18717,
   "missing_players_count": 0,
   "pages_processed": 0,
   "columns": [
@@ -99,28 +99,23 @@
     "weak_foot_usage": 0,
     "weak_foot_accuracy": 0,
     "playing_style": 0,
-    "Player_Skills_1": 4508,
-    "Player_Skills_2": 7326,
-    "Player_Skills_3": 9969,
-    "Player_Skills_4": 12090,
-    "Player_Skills_5": 13765,
-    "Player_Skills_6": 15039,
-    "Player_Skills_7": 15999,
-    "Player_Skills_8": 16753,
-    "Player_Skills_9": 17305,
-    "Player_Skills_10": 17720
+    "Player_Skills_1": 4591,
+    "Player_Skills_2": 7426,
+    "Player_Skills_3": 10083,
+    "Player_Skills_4": 12218,
+    "Player_Skills_5": 13898,
+    "Player_Skills_6": 15171,
+    "Player_Skills_7": 16133,
+    "Player_Skills_8": 16887,
+    "Player_Skills_9": 17439,
+    "Player_Skills_10": 17855
   },
   "has_errors": false,
-  "chunk_count": 93,
-  "errors": [
-    {
-      "player_id": "121654",
-      "error": "429 Client Error: Too Many Requests for url: https://pesdb.net/efootball/?id=121654"
-    }
-  ],
-  "expected_player_ids": 18580,
-  "extracted_players": 18580,
-  "added_players_count": 18580,
+  "chunk_count": 94,
+  "errors": [],
+  "expected_player_ids": 18717,
+  "extracted_players": 18717,
+  "added_players_count": 18717,
   "removed_players_count": 0,
   "changed_players_count": 0
 }
