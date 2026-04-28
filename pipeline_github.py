@@ -56,6 +56,18 @@ def github_request_session():
 
 
 def fetch_previous_repo_json(repo_path):
+    local_path = Path(repo_path)
+    if local_path.exists():
+        content = local_path.read_text(encoding="utf-8").strip()
+        if not content:
+            return []
+        try:
+            parsed = json.loads(content)
+        except json.JSONDecodeError:
+            print(f"[DIFF] Snapshot locale precedente non valido in {repo_path}, confronto remoto tentato")
+        else:
+            return parsed if isinstance(parsed, list) else []
+
     repo = os.getenv("GITHUB_REPOSITORY")
     branch = os.getenv("GITHUB_BRANCH", "main")
     session = github_request_session()

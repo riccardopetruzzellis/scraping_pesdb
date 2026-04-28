@@ -124,11 +124,28 @@ jobs:
           path: output/chunks
           merge-multiple: true
 
-      - name: Merge and push
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GITHUB_REPOSITORY: ${{ github.repository }}
-          GITHUB_BRANCH: ${{ github.ref_name }}
-          GITHUB_JSON_PATH: data/pesdb_players_it.json
-          GITHUB_META_PATH: data/pesdb_players_meta.json
-        run: python pipeline_github.py merge --push-to-github
+      - name: Merge generated data
+        shell: bash
+        run: |
+          python pipeline_github.py merge
+
+          extraction_stamp="$(date -u +'%d_%m_%Y')"
+          mkdir -p data
+          cp output/pesdb_players_it.json data/pesdb_players_it.json
+          cp output/pesdb_players_it.json "data/estrazione_${extraction_stamp}.json"
+          cp output/pesdb_players_meta.json data/pesdb_players_meta.json
+          cp output/pesdb_players_diff.json data/pesdb_players_diff.json
+          cp output/pesdb_players_it.csv data/pesdb_players_it.csv
+
+      - name: Commit generated data
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add data/pesdb_players_it.json data/pesdb_players_meta.json data/pesdb_players_diff.json data/pesdb_players_it.csv data/estrazione_*.json
+          if git diff --cached --quiet; then
+            echo "No generated data changes to commit."
+          else
+            git commit -m "Update PESDB generated data"
+            git push
+          fi
