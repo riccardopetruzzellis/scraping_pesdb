@@ -101,6 +101,54 @@ COLUMN_TRANSLATIONS = {
     "Playing Style": "Stile di Gioco",
     "Player Skills": "Abilita Giocatore",
     "AI Playing Styles": "Stili IA",
+    "Strong Positions": "ruoli_naturali",
+    "Secondary Positions": "ruoli_secondari",
+    "Playable Positions": "ruoli_utilizzabili",
+    "Pos_GK": "pos_pt",
+    "Pos_CB": "pos_dc",
+    "Pos_LB": "pos_ts",
+    "Pos_RB": "pos_td",
+    "Pos_DMF": "pos_med",
+    "Pos_CMF": "pos_cc",
+    "Pos_LMF": "pos_cls",
+    "Pos_RMF": "pos_cld",
+    "Pos_AMF": "pos_trq",
+    "Pos_LWF": "pos_esa",
+    "Pos_RWF": "pos_eda",
+    "Pos_SS": "pos_sp",
+    "Pos_CF": "pos_p",
+}
+
+POSITION_CODES = [
+    "GK",
+    "CB",
+    "LB",
+    "RB",
+    "DMF",
+    "CMF",
+    "LMF",
+    "RMF",
+    "AMF",
+    "LWF",
+    "RWF",
+    "SS",
+    "CF",
+]
+
+POSITION_TRANSLATIONS = {
+    "GK": "PT",
+    "CB": "DC",
+    "LB": "TS",
+    "RB": "TD",
+    "DMF": "MED",
+    "CMF": "CC",
+    "LMF": "CLS",
+    "RMF": "CLD",
+    "AMF": "TRQ",
+    "LWF": "ESA",
+    "RWF": "EDA",
+    "SS": "SP",
+    "CF": "P",
 }
 
 VALUE_TRANSLATIONS = {
@@ -249,6 +297,38 @@ def extract_ids_from_page(session, page_number):
     return player_ids, True, len(player_ids)
 
 
+def extract_position_map(soup):
+    pitch = soup.find("div", class_="pitch")
+    if not pitch:
+        return {f"Pos_{position}": 0 for position in POSITION_CODES}
+
+    strong_positions = []
+    secondary_positions = []
+    position_scores = {position: 0 for position in POSITION_CODES}
+    for marker in pitch.find_all("div", recursive=False):
+        classes = marker.get("class", [])
+        position = next((item.upper() for item in classes if item not in {"pos1", "pos2"}), None)
+        if not position or position not in position_scores:
+            continue
+        if "pos2" in classes:
+            strong_positions.append(position)
+            position_scores[position] = 2
+        elif "pos1" in classes:
+            secondary_positions.append(position)
+            position_scores[position] = max(position_scores[position], 1)
+
+    playable_positions = strong_positions + [
+        position for position in secondary_positions if position not in strong_positions
+    ]
+    payload = {
+        "Strong Positions": " | ".join(POSITION_TRANSLATIONS[position] for position in strong_positions),
+        "Secondary Positions": " | ".join(POSITION_TRANSLATIONS[position] for position in secondary_positions),
+        "Playable Positions": " | ".join(POSITION_TRANSLATIONS[position] for position in playable_positions),
+    }
+    payload.update({f"Pos_{position}": position_scores[position] for position in POSITION_CODES})
+    return payload
+
+
 def extract_all_player_ids(start_page, end_page=None, max_empty_pages=MAX_EMPTY_PAGES):
     all_ids = []
     page_logs = []
@@ -292,6 +372,7 @@ def extract_player_details(session, player_id):
 
     soup = BeautifulSoup(response.text, "html.parser")
     player_data = {"player_id": player_id}
+    player_data.update(extract_position_map(soup))
 
     for table in soup.find_all("table"):
         if "playing_styles" in table.get("class", []):
@@ -511,7 +592,7 @@ def split_into_chunks(items, chunk_size=CHUNK_SIZE):
 
 def save_json(path, payload):
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    path.write_text(json.dumps(payload, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
 
 
 def load_json(path, default):
@@ -717,10 +798,10 @@ def run(start_page, end_page, excluded_columns):
     raw_df.to_csv(RAW_CSV_FILE, index=False, encoding="utf-8-sig")
 
     final_df = transform_dataframe(raw_df, effective_excluded_columns, custom_column_names, custom_translations)
-    final_df.to_json(FINAL_JSON_FILE, orient="records", force_ascii=False, indent=2)
+    final_df.to_json(FINAL_JSON_FILE, orient="records", force_ascii=False)
     final_df.to_csv(FINAL_CSV_FILE, index=False, encoding="utf-8-sig")
     metadata = build_metadata(final_df, page_logs, player_ids)
-    FINAL_META_FILE.write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
+    FINAL_META_FILE.write_text(json.dumps(metadata, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
     push_outputs_to_github()
 
     append_run_log(f"=== Fine run {time.strftime('%Y-%m-%d %H:%M:%S')} - giocatori: {len(final_df)} ===")

@@ -183,12 +183,12 @@ def merge(push_to_github):
     raw_df.to_csv(MERGED_DIR / "pesdb_players_raw.csv", index=False, encoding="utf-8-sig")
 
     final_df = transform_dataframe(raw_df, effective_excluded_columns, custom_column_names, custom_translations)
-    final_df.to_json(FINAL_JSON_FILE, orient="records", force_ascii=False, indent=2)
+    final_df.to_json(FINAL_JSON_FILE, orient="records", force_ascii=False)
     final_df.to_csv(FINAL_CSV_FILE, index=False, encoding="utf-8-sig")
     current_players = json.loads(FINAL_JSON_FILE.read_text(encoding="utf-8"))
     previous_players = fetch_previous_repo_json(os.getenv("GITHUB_JSON_PATH", "data/pesdb_players_it.json"))
     diff_payload = build_diff(previous_players, current_players)
-    FINAL_DIFF_FILE.write_text(json.dumps(diff_payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    FINAL_DIFF_FILE.write_text(json.dumps(diff_payload, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
 
     metadata = build_metadata(final_df, [], all_ids)
     metadata["chunk_count"] = len(manifest)
@@ -207,7 +207,7 @@ def merge(push_to_github):
         raise RuntimeError(
             f"Giocatori mancanti nel merge: estratti {len(final_df)} su {len(all_ids)} ID attesi"
         )
-    FINAL_META_FILE.write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
+    FINAL_META_FILE.write_text(json.dumps(metadata, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
 
     if push_to_github:
         from scraping_pesdb_unificato import push_outputs_to_github
