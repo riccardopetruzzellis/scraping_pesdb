@@ -17,13 +17,15 @@ from bs4 import BeautifulSoup
 BASE_URL = "https://pesdb.net/efootball/"
 START_PAGE = 1
 END_PAGE = None
-LIST_SLEEP_MIN = 0.2
-LIST_SLEEP_MAX = 0.6
+LIST_SLEEP_MIN = 1.0
+LIST_SLEEP_MAX = 2.5
 DETAIL_SLEEP_SECONDS = 4
 SAVE_EVERY = 50
 REQUEST_TIMEOUT = 20
 MAX_EMPTY_PAGES = 2
 CHUNK_SIZE = 200
+LIST_RETRY_ATTEMPTS = 6
+LIST_RETRY_BASE_SECONDS = 30
 DETAIL_RETRY_ATTEMPTS = 4
 DETAIL_RETRY_BASE_SECONDS = 8
 FINAL_RECOVERY_SLEEP_SECONDS = 12
@@ -192,8 +194,40 @@ def build_session():
 def extract_ids_from_page(session, page_number):
     url = f"{BASE_URL}?page={page_number}"
     print(f"[LISTA] Pagina {page_number}")
-    response = session.get(url, timeout=REQUEST_TIMEOUT)
-    response.raise_for_status()
+    last_error = None
+    response = None
+    for attempt in range(1, LIST_RETRY_ATTEMPTS + 1):
+        try:
+            response = session.get(url, timeout=REQUEST_TIMEOUT)
+            response.raise_for_status()
+            last_error = None
+            break
+        except requests.HTTPError as exc:
+            last_error = exc
+            status_code = exc.response.status_code if exc.response is not None else None
+            if status_code not in {429, 500, 502, 503, 504}:
+                raise
+            retry_after = exc.response.headers.get("Retry-After") if exc.response is not None else None
+        except requests.RequestException as exc:
+            last_error = exc
+            retry_after = None
+
+        if attempt == LIST_RETRY_ATTEMPTS:
+            break
+
+        if retry_after and retry_after.isdigit():
+            sleep_seconds = int(retry_after)
+        else:
+            sleep_seconds = LIST_RETRY_BASE_SECONDS * attempt + random.uniform(0, LIST_SLEEP_MAX)
+        print(
+            f"[RETRY] pagina {page_number} tentativo {attempt}/{LIST_RETRY_ATTEMPTS} fallito, "
+            f"attendo {sleep_seconds:.1f}s"
+        )
+        time.sleep(sleep_seconds)
+
+    if last_error is not None or response is None:
+        raise last_error
+
     soup = BeautifulSoup(response.text, "html.parser")
     table = soup.find("table", class_="players")
     if not table:
