@@ -1,1 +1,1 @@
-{"added_players_count":0,"removed_players_count":0,"changed_players_count":0,"added_player_ids":[],"removed_player_ids":[],"changed_players":[]}
+{"added_players_count":0,"removed_players_count":0,"changed_players_count":2,"added_player_ids":[],"removed_player_ids":[],"changed_players":[{"player_id":"135615","changes":{"weight":{"old":"91","new":"100"}}},{"player_id":"178942","changes":{"gk_awareness":{"old":"69","new":"71"},"gk_catching":{"old":"66","new":"68"},"gk_parrying":{"old":"67","new":"70"},"gk_reflexes":{"old":"72","new":"74"},"height":{"old":"195","new":"185"}}}]}
