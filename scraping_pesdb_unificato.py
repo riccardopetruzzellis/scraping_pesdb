@@ -9,6 +9,7 @@ import time
 import unicodedata
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import urljoin
 
 import pandas as pd
 import requests
@@ -42,9 +43,15 @@ INCREMENTAL_MODE = os.getenv("PESDB_INCREMENTAL_MODE", "1").lower() not in {
     "false",
     "no",
 }
+CHANGELOG_MODIFIED_MODE = os.getenv("PESDB_CHANGELOG_MODIFIED_MODE", "1").lower() not in {
+    "0",
+    "false",
+    "no",
+}
 INCREMENTAL_REFRESH_BUCKETS = max(1, int(os.getenv("PESDB_INCREMENTAL_REFRESH_BUCKETS", "4")))
 LIST_COMPARE_FIELDS = (
     "name",
+    "role",
     "real_team_code",
     "nation",
     "height",
@@ -261,6 +268,11 @@ def build_session():
     return session
 
 
+def normalize_list_role(value):
+    clean_value = normalize_text(value)
+    return POSITION_TRANSLATIONS.get(clean_value, clean_value)
+
+
 def extract_player_summaries_from_page(session, page_number):
     url = f"{BASE_URL}?page={page_number}"
     print(f"[LISTA] Pagina {page_number}")
@@ -317,7 +329,7 @@ def extract_player_summaries_from_page(session, page_number):
             player_summaries.append(
                 {
                     "pesdb_id": match.group(1),
-                    "role": normalize_text(cols[0].get_text(" ", strip=True)) if len(cols) > 0 else "",
+                    "role": normalize_list_role(cols[0].get_text(" ", strip=True)) if len(cols) > 0 else "",
                     "name": normalize_text(player_link.get_text(" ", strip=True)),
                     "real_team_code": normalize_text(cols[2].get_text(" ", strip=True)) if len(cols) > 2 else "",
                     "nation": normalize_text(cols[3].get_text(" ", strip=True)) if len(cols) > 3 else "",
@@ -334,6 +346,43 @@ def extract_player_summaries_from_page(session, page_number):
 def extract_ids_from_page(session, page_number):
     summaries, table_found, rows = extract_player_summaries_from_page(session, page_number)
     return [item["pesdb_id"] for item in summaries], table_found, rows
+
+
+def extract_modified_player_ids(session=None):
+    session = session or build_session()
+    try:
+        response = session.get(BASE_URL, timeout=REQUEST_TIMEOUT)
+        response.raise_for_status()
+    except requests.RequestException as exc:
+        print(f"[CHANGELOG] Impossibile leggere la home PESDB: {exc}")
+        return set()
+
+    soup = BeautifulSoup(response.text, "html.parser")
+    modified_link = None
+    for link in soup.find_all("a", href=True):
+        label = normalize_text(link.get_text(" ", strip=True)).lower()
+        href = link["href"]
+        if "modified-players" in href or label == "modified players":
+            modified_link = urljoin(BASE_URL, href)
+            break
+
+    if not modified_link:
+        print("[CHANGELOG] Link Modified Players non trovato")
+        return set()
+
+    try:
+        response = session.get(modified_link, timeout=REQUEST_TIMEOUT)
+        response.raise_for_status()
+    except requests.RequestException as exc:
+        print(f"[CHANGELOG] Impossibile leggere Modified Players: {exc}")
+        return set()
+
+    modified_ids = {
+        match.group(1)
+        for match in re.finditer(r"[?&]id=(\d+)", response.text)
+    }
+    print(f"[CHANGELOG] Giocatori modificati PESDB trovati: {len(modified_ids)}")
+    return modified_ids
 
 
 def extract_position_map(soup):
@@ -728,6 +777,9 @@ def should_scrape_player(player_id, summary, previous_index):
     if not previous:
         return True, "new_player"
 
+    if summary.get("listed_as_modified"):
+        return True, "pesdb_modified_players"
+
     for field in LIST_COMPARE_FIELDS:
         if summary_value(summary.get(field)) != summary_value(previous.get(field)):
             return True, f"list_changed:{field}"
@@ -898,6 +950,10 @@ def run(start_page, end_page, excluded_columns):
     effective_excluded_columns = set(excluded_columns) | file_excluded_columns
 
     player_summaries, page_logs = extract_all_player_summaries(start_page, end_page)
+    modified_player_ids = extract_modified_player_ids() if INCREMENTAL_MODE and CHANGELOG_MODIFIED_MODE else set()
+    for summary in player_summaries:
+        summary["listed_as_modified"] = summary["pesdb_id"] in modified_player_ids
+
     player_ids = [summary["pesdb_id"] for summary in player_summaries]
     player_summaries_by_id = {summary["pesdb_id"]: summary for summary in player_summaries}
     write_text_file(RAW_IDS_FILE, player_ids)

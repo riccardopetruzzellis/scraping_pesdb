@@ -17,6 +17,7 @@ from scraping_pesdb_unificato import (
     FINAL_JSON_FILE,
     FINAL_META_FILE,
     REQUEST_TIMEOUT,
+    CHANGELOG_MODIFIED_MODE,
     FAST_FAIL_RATE_LIMIT_IN_CHUNKS,
     INCREMENTAL_MODE,
     INCREMENTAL_REFRESH_BUCKETS,
@@ -27,6 +28,7 @@ from scraping_pesdb_unificato import (
     build_metadata,
     build_session,
     extract_all_player_summaries,
+    extract_modified_player_ids,
     extract_player_details_with_retry_mode,
     index_players_by_id,
     load_custom_rules,
@@ -100,6 +102,10 @@ def fetch_previous_repo_json(repo_path):
 def prepare(end_page, chunk_size):
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     player_summaries, page_logs = extract_all_player_summaries(1, end_page)
+    modified_player_ids = extract_modified_player_ids() if INCREMENTAL_MODE and CHANGELOG_MODIFIED_MODE else set()
+    for summary in player_summaries:
+        summary["listed_as_modified"] = summary["pesdb_id"] in modified_player_ids
+
     player_ids = [item["pesdb_id"] for item in player_summaries]
     RAW_IDS_FILE.write_text("\n".join(player_ids), encoding="utf-8")
     pd.DataFrame(page_logs).to_excel(PAGE_LOG_FILE, index=False)

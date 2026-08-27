@@ -107,7 +107,8 @@ Per ridurre tempi ed errori dopo gli aggiornamenti settimanali di PESDB, la pipe
 La lista giocatori viene sempre riletta tutta, cosi' non si perdono nuovi ID. Le schede complete vengono invece scaricate solo quando serve:
 
 - giocatore nuovo;
-- dati principali cambiati nella lista PESDB: nome, squadra, nazione, altezza, peso, eta', overall;
+- giocatore presente nella pagina `Modified Players` dell'ultimo update PESDB, cosi' vengono intercettate anche modifiche interne come statistiche e stile di gioco;
+- dati principali cambiati nella lista PESDB: nome, ruolo, squadra, nazione, altezza, peso, eta', overall;
 - quota di refresh periodico, per intercettare modifiche non visibili nella lista.
 
 I giocatori invariati vengono riusati dal JSON precedente in `data/pesdb_players_it.json`, mantenendo invariato il formato finale importabile in app.
@@ -115,6 +116,7 @@ I giocatori invariati vengono riusati dal JSON precedente in `data/pesdb_players
 Variabili utili:
 
 - `PESDB_INCREMENTAL_MODE=0` forza una scansione completa;
+- `PESDB_CHANGELOG_MODIFIED_MODE=0` disattiva il refresh forzato dei giocatori presenti in `Modified Players`;
 - `PESDB_INCREMENTAL_REFRESH_BUCKETS=4` e' il default: circa un quarto delle schede viene comunque aggiornato a ogni run;
 - `PESDB_INCREMENTAL_REFRESH_BUCKETS=1` equivale a riscaricare tutti i dettagli.
 
