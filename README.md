@@ -112,6 +112,7 @@ La lista giocatori viene sempre riletta tutta, cosi' non si perdono nuovi ID. Le
 - quota di refresh periodico, per intercettare modifiche non visibili nella lista.
 
 I giocatori invariati vengono riusati dal JSON precedente in `data/pesdb_players_it.json`, mantenendo invariato il formato finale importabile in app.
+Gli stili di gioco vengono normalizzati anche nel formato nuovo `Att:... | Def:...`, traducendo i singoli valori e mantenendo le due sezioni separate.
 
 Variabili utili:
 

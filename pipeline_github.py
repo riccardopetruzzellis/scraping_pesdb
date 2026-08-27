@@ -33,6 +33,7 @@ from scraping_pesdb_unificato import (
     index_players_by_id,
     load_custom_rules,
     load_json,
+    normalize_final_player_values,
     recover_missing_players,
     save_json,
     should_scrape_player,
@@ -252,14 +253,18 @@ def merge(push_to_github):
     if merged_players:
         final_df = transform_dataframe(raw_df, effective_excluded_columns, custom_column_names, custom_translations)
         final_players.extend(json.loads(final_df.to_json(orient="records", force_ascii=False)))
-    final_players.extend(merged_cached_players)
+    final_players.extend(
+        normalize_final_player_values(player, custom_translations)
+        for player in merged_cached_players
+    )
 
     unique_final_players = {}
     for player in final_players:
         player_id = str(player.get("pesdb_id") or player.get("player_id") or "").strip()
         if player_id:
             unique_final_players[player_id] = player
-    final_players = list(unique_final_players.values())
+    ordered_ids = list(dict.fromkeys(str(player_id) for player_id in all_ids))
+    final_players = [unique_final_players[player_id] for player_id in ordered_ids if player_id in unique_final_players]
     final_df = pd.DataFrame(final_players)
     final_df.to_json(FINAL_JSON_FILE, orient="records", force_ascii=False)
     final_df.to_csv(FINAL_CSV_FILE, index=False, encoding="utf-8-sig")

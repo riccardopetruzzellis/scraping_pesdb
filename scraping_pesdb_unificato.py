@@ -223,6 +223,7 @@ VALUE_TRANSLATIONS = {
     "Defensive Goalkeeper": "Portiere Difensivo",
     "Prolific Winger": "Ala Prolifica",
     "Roaming Flank": "Ala Mobile",
+    "Basic": "Base",
     "-": "",
 }
 
@@ -635,6 +636,39 @@ def translate_value(value, custom_translations):
     return custom_translations.get(normalize_lookup_key(normalized), VALUE_TRANSLATIONS.get(normalized, normalized))
 
 
+def translate_playing_style(value, custom_translations):
+    if pd.isna(value):
+        return value
+
+    translated_sections = []
+    for section in str(value).split("|"):
+        clean_section = normalize_text(section)
+        if not clean_section:
+            continue
+
+        if ":" not in clean_section:
+            translated = translate_value(clean_section, custom_translations)
+            if translated:
+                translated_sections.append(translated)
+            continue
+
+        prefix, style = clean_section.split(":", 1)
+        clean_prefix = normalize_text(prefix)
+        clean_style = normalize_text(style)
+        translated_style = translate_value(clean_style, custom_translations)
+        translated_sections.append(f"{clean_prefix}:{translated_style}" if translated_style else f"{clean_prefix}:")
+
+    return " | ".join(translated_sections)
+
+
+def normalize_final_player_values(player, custom_translations):
+    normalized_player = dict(player)
+    for key in ("playing_style", "Stile di Gioco", "Playing Style"):
+        if key in normalized_player:
+            normalized_player[key] = translate_playing_style(normalized_player[key], custom_translations)
+    return normalized_player
+
+
 def split_player_skills(df):
     skill_column = next((col for col in df.columns if normalize_lookup_key(col) == "playerskills"), None)
     if not skill_column:
@@ -665,7 +699,11 @@ def transform_dataframe(df, excluded_columns, custom_column_names, custom_transl
     df = df.loc[:, [col for col in df.columns if col not in normalized_excluded_columns]]
 
     for column in df.columns:
-        if column in {"Playing Style", "Position:", "Foot:", "Weak Foot Usage:", "Weak Foot Accuracy:", "Form:", "Rating:"}:
+        if column == "Playing Style":
+            df[column] = df[column].map(
+                lambda value: translate_playing_style(value, custom_translations) if pd.notna(value) else value
+            )
+        elif column in {"Position:", "Foot:", "Weak Foot Usage:", "Weak Foot Accuracy:", "Form:", "Rating:"}:
             df[column] = df[column].map(lambda value: translate_value(value, custom_translations) if pd.notna(value) else value)
         elif column in {"Player Skills", "AI Playing Styles"}:
             df[column] = df[column].map(
@@ -999,14 +1037,20 @@ def run(start_page, end_page, excluded_columns):
     if all_players:
         final_df = transform_dataframe(raw_df, effective_excluded_columns, custom_column_names, custom_translations)
         final_players.extend(json.loads(final_df.to_json(orient="records", force_ascii=False)))
-    final_players.extend(cached_players)
+    final_players.extend(
+        normalize_final_player_values(player, custom_translations)
+        for player in cached_players
+    )
 
     unique_final_players = {}
     for player in final_players:
         player_id = str(player.get("pesdb_id") or player.get("player_id") or "").strip()
         if player_id:
             unique_final_players[player_id] = player
-    final_df = pd.DataFrame(list(unique_final_players.values()))
+    ordered_ids = list(dict.fromkeys(str(player_id) for player_id in player_ids))
+    final_df = pd.DataFrame(
+        [unique_final_players[player_id] for player_id in ordered_ids if player_id in unique_final_players]
+    )
     final_df.to_json(FINAL_JSON_FILE, orient="records", force_ascii=False)
     final_df.to_csv(FINAL_CSV_FILE, index=False, encoding="utf-8-sig")
     metadata = build_metadata(final_df, page_logs, player_ids)
