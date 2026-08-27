@@ -100,6 +100,24 @@ Guida:
 
 - `DEPLOY_GITHUB_ACTIONS.md`
 
+### Scraping incrementale
+
+Per ridurre tempi ed errori dopo gli aggiornamenti settimanali di PESDB, la pipeline usa lo scraping incrementale.
+
+La lista giocatori viene sempre riletta tutta, cosi' non si perdono nuovi ID. Le schede complete vengono invece scaricate solo quando serve:
+
+- giocatore nuovo;
+- dati principali cambiati nella lista PESDB: nome, squadra, nazione, altezza, peso, eta', overall;
+- quota di refresh periodico, per intercettare modifiche non visibili nella lista.
+
+I giocatori invariati vengono riusati dal JSON precedente in `data/pesdb_players_it.json`, mantenendo invariato il formato finale importabile in app.
+
+Variabili utili:
+
+- `PESDB_INCREMENTAL_MODE=0` forza una scansione completa;
+- `PESDB_INCREMENTAL_REFRESH_BUCKETS=4` e' il default: circa un quarto delle schede viene comunque aggiornato a ogni run;
+- `PESDB_INCREMENTAL_REFRESH_BUCKETS=1` equivale a riscaricare tutti i dettagli.
+
 ### Metadata prodotti
 
 Il file `pesdb_players_meta.json` contiene:
@@ -112,6 +130,7 @@ Il file `pesdb_players_meta.json` contiene:
 - numero celle vuote per colonna
 - flag presenza errori
 - numero giocatori aggiunti/rimossi/modificati rispetto al run precedente
+- numero giocatori scaricati davvero e riusati da cache nel run incrementale
 
 Questo file serve per mostrare nell'app pubblicata se il run e' andato bene.
 

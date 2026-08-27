@@ -1,5 +1,6 @@
 import argparse
 import base64
+import hashlib
 import json
 import os
 import random
@@ -36,10 +37,26 @@ FAST_FAIL_RATE_LIMIT_IN_CHUNKS = os.getenv("PESDB_FAST_FAIL_429", "1").lower() n
     "false",
     "no",
 }
+INCREMENTAL_MODE = os.getenv("PESDB_INCREMENTAL_MODE", "1").lower() not in {
+    "0",
+    "false",
+    "no",
+}
+INCREMENTAL_REFRESH_BUCKETS = max(1, int(os.getenv("PESDB_INCREMENTAL_REFRESH_BUCKETS", "4")))
+LIST_COMPARE_FIELDS = (
+    "name",
+    "real_team_code",
+    "nation",
+    "height",
+    "weight",
+    "age",
+    "overall",
+)
 
 OUTPUT_DIR = Path(__file__).resolve().parent / "output"
 MODIFICATIONS_FILE = Path(__file__).resolve().parent / "file_modifiche.xlsx"
 MODIFICATIONS_SHEET = "Regole"
+PREVIOUS_DATA_FILE = Path(__file__).resolve().parent / "data" / "pesdb_players_it.json"
 RAW_IDS_FILE = OUTPUT_DIR / "player_ids.txt"
 RAW_CSV_FILE = OUTPUT_DIR / "pesdb_players_raw.csv"
 FINAL_JSON_FILE = OUTPUT_DIR / "pesdb_players_it.json"
@@ -244,7 +261,7 @@ def build_session():
     return session
 
 
-def extract_ids_from_page(session, page_number):
+def extract_player_summaries_from_page(session, page_number):
     url = f"{BASE_URL}?page={page_number}"
     print(f"[LISTA] Pagina {page_number}")
     last_error = None
@@ -286,7 +303,7 @@ def extract_ids_from_page(session, page_number):
     if not table:
         return [], False, 0
 
-    player_ids = []
+    player_summaries = []
     rows = table.find_all("tr")[1:]
     for row in rows:
         cols = row.find_all("td")
@@ -297,9 +314,26 @@ def extract_ids_from_page(session, page_number):
             continue
         match = re.search(r"id=(\d+)", player_link["href"])
         if match:
-            player_ids.append(match.group(1))
+            player_summaries.append(
+                {
+                    "pesdb_id": match.group(1),
+                    "role": normalize_text(cols[0].get_text(" ", strip=True)) if len(cols) > 0 else "",
+                    "name": normalize_text(player_link.get_text(" ", strip=True)),
+                    "real_team_code": normalize_text(cols[2].get_text(" ", strip=True)) if len(cols) > 2 else "",
+                    "nation": normalize_text(cols[3].get_text(" ", strip=True)) if len(cols) > 3 else "",
+                    "height": normalize_text(cols[4].get_text(" ", strip=True)) if len(cols) > 4 else "",
+                    "weight": normalize_text(cols[5].get_text(" ", strip=True)) if len(cols) > 5 else "",
+                    "age": normalize_text(cols[6].get_text(" ", strip=True)) if len(cols) > 6 else "",
+                    "overall": normalize_text(cols[7].get_text(" ", strip=True)) if len(cols) > 7 else "",
+                }
+            )
 
-    return player_ids, True, len(player_ids)
+    return player_summaries, True, len(player_summaries)
+
+
+def extract_ids_from_page(session, page_number):
+    summaries, table_found, rows = extract_player_summaries_from_page(session, page_number)
+    return [item["pesdb_id"] for item in summaries], table_found, rows
 
 
 def extract_position_map(soup):
@@ -368,6 +402,42 @@ def extract_all_player_ids(start_page, end_page=None, max_empty_pages=MAX_EMPTY_
 
     unique_ids = list(dict.fromkeys(all_ids))
     return unique_ids, page_logs
+
+
+def extract_all_player_summaries(start_page, end_page=None, max_empty_pages=MAX_EMPTY_PAGES):
+    summaries_by_id = {}
+    page_logs = []
+    current_page = start_page
+    empty_pages_in_a_row = 0
+    session = build_session()
+
+    while end_page is None or current_page <= end_page:
+        summaries, table_found, rows = extract_player_summaries_from_page(session, current_page)
+        page_logs.append(
+            {
+                "Pagina": current_page,
+                "Tabella trovata": table_found,
+                "ID estratti": rows,
+            }
+        )
+
+        if not table_found or rows == 0:
+            empty_pages_in_a_row += 1
+            print(f"[LISTA] Pagina senza giocatori ({empty_pages_in_a_row}/{max_empty_pages})")
+            current_page += 1
+            if empty_pages_in_a_row >= max_empty_pages:
+                print("[LISTA] Raggiunta la fine delle pagine con giocatori")
+                return list(summaries_by_id.values()), page_logs
+            time.sleep(random.uniform(LIST_SLEEP_MIN, LIST_SLEEP_MAX))
+            continue
+
+        empty_pages_in_a_row = 0
+        for summary in summaries:
+            summaries_by_id[summary["pesdb_id"]] = summary
+        current_page += 1
+        time.sleep(random.uniform(LIST_SLEEP_MIN, LIST_SLEEP_MAX))
+
+    return list(summaries_by_id.values()), page_logs
 
 
 def extract_player_details(session, player_id):
@@ -637,6 +707,37 @@ def index_players_by_id(players):
     return indexed
 
 
+def current_refresh_bucket():
+    return datetime.now(timezone.utc).isocalendar().week % INCREMENTAL_REFRESH_BUCKETS
+
+
+def player_refresh_bucket(player_id):
+    digest = hashlib.sha1(str(player_id).encode("utf-8")).hexdigest()
+    return int(digest[:8], 16) % INCREMENTAL_REFRESH_BUCKETS
+
+
+def summary_value(value):
+    return normalize_text("" if value is None else str(value))
+
+
+def should_scrape_player(player_id, summary, previous_index):
+    if not INCREMENTAL_MODE or not previous_index:
+        return True, "full_mode"
+
+    previous = previous_index.get(str(player_id))
+    if not previous:
+        return True, "new_player"
+
+    for field in LIST_COMPARE_FIELDS:
+        if summary_value(summary.get(field)) != summary_value(previous.get(field)):
+            return True, f"list_changed:{field}"
+
+    if player_refresh_bucket(player_id) == current_refresh_bucket():
+        return True, "scheduled_refresh"
+
+    return False, "cached"
+
+
 def build_diff(previous_players, current_players):
     previous_index = index_players_by_id(previous_players)
     current_index = index_players_by_id(current_players)
@@ -796,16 +897,30 @@ def run(start_page, end_page, excluded_columns):
     custom_column_names, custom_translations, file_excluded_columns = load_custom_rules()
     effective_excluded_columns = set(excluded_columns) | file_excluded_columns
 
-    player_ids, page_logs = extract_all_player_ids(start_page, end_page)
+    player_summaries, page_logs = extract_all_player_summaries(start_page, end_page)
+    player_ids = [summary["pesdb_id"] for summary in player_summaries]
+    player_summaries_by_id = {summary["pesdb_id"]: summary for summary in player_summaries}
     write_text_file(RAW_IDS_FILE, player_ids)
     pd.DataFrame(page_logs).to_excel(PAGE_LOG_FILE, index=False)
     print(f"[LISTA] ID unici trovati: {len(player_ids)}")
 
     session = build_session()
+    previous_players = load_json(PREVIOUS_DATA_FILE, [])
+    previous_index = index_players_by_id(previous_players)
 
     all_players = []
+    cached_players = []
+    decision_counts = {}
     total = len(player_ids)
     for index, player_id in enumerate(player_ids, start=1):
+        summary = player_summaries_by_id.get(player_id, {"pesdb_id": player_id})
+        should_scrape, reason = should_scrape_player(player_id, summary, previous_index)
+        decision_counts[reason] = decision_counts.get(reason, 0) + 1
+        if not should_scrape:
+            cached_players.append(previous_index[str(player_id)])
+            print(f"[DETTAGLIO] {index}/{total} player {player_id} riusato da cache")
+            continue
+
         print(f"[DETTAGLIO] {index}/{total} player {player_id}")
         try:
             all_players.append(extract_player_details_with_retry(session, player_id))
@@ -824,10 +939,30 @@ def run(start_page, end_page, excluded_columns):
     raw_df = pd.DataFrame(all_players)
     raw_df.to_csv(RAW_CSV_FILE, index=False, encoding="utf-8-sig")
 
-    final_df = transform_dataframe(raw_df, effective_excluded_columns, custom_column_names, custom_translations)
+    final_players = []
+    if all_players:
+        final_df = transform_dataframe(raw_df, effective_excluded_columns, custom_column_names, custom_translations)
+        final_players.extend(json.loads(final_df.to_json(orient="records", force_ascii=False)))
+    final_players.extend(cached_players)
+
+    unique_final_players = {}
+    for player in final_players:
+        player_id = str(player.get("pesdb_id") or player.get("player_id") or "").strip()
+        if player_id:
+            unique_final_players[player_id] = player
+    final_df = pd.DataFrame(list(unique_final_players.values()))
     final_df.to_json(FINAL_JSON_FILE, orient="records", force_ascii=False)
     final_df.to_csv(FINAL_CSV_FILE, index=False, encoding="utf-8-sig")
     metadata = build_metadata(final_df, page_logs, player_ids)
+    metadata.update(
+        {
+            "scraped_players_count": len(all_players),
+            "cached_players_count": len(cached_players),
+            "incremental_mode": INCREMENTAL_MODE,
+            "incremental_refresh_buckets": INCREMENTAL_REFRESH_BUCKETS,
+            "incremental_decision_counts": decision_counts,
+        }
+    )
     FINAL_META_FILE.write_text(json.dumps(metadata, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
     push_outputs_to_github()
 

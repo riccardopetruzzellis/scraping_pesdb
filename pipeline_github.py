@@ -2,7 +2,6 @@ import argparse
 import base64
 import json
 import os
-from datetime import datetime, timezone
 from pathlib import Path
 
 import pandas as pd
@@ -19,18 +18,22 @@ from scraping_pesdb_unificato import (
     FINAL_META_FILE,
     REQUEST_TIMEOUT,
     FAST_FAIL_RATE_LIMIT_IN_CHUNKS,
+    INCREMENTAL_MODE,
+    INCREMENTAL_REFRESH_BUCKETS,
     OUTPUT_DIR,
     PAGE_LOG_FILE,
     RAW_IDS_FILE,
     build_diff,
     build_metadata,
     build_session,
-    extract_all_player_ids,
+    extract_all_player_summaries,
     extract_player_details_with_retry_mode,
+    index_players_by_id,
     load_custom_rules,
     load_json,
     recover_missing_players,
     save_json,
+    should_scrape_player,
     split_into_chunks,
     transform_dataframe,
 )
@@ -96,16 +99,17 @@ def fetch_previous_repo_json(repo_path):
 
 def prepare(end_page, chunk_size):
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    player_ids, page_logs = extract_all_player_ids(1, end_page)
+    player_summaries, page_logs = extract_all_player_summaries(1, end_page)
+    player_ids = [item["pesdb_id"] for item in player_summaries]
     RAW_IDS_FILE.write_text("\n".join(player_ids), encoding="utf-8")
     pd.DataFrame(page_logs).to_excel(PAGE_LOG_FILE, index=False)
 
     chunk_map = []
     CHUNKS_DIR.mkdir(parents=True, exist_ok=True)
-    for index, chunk_ids in enumerate(split_into_chunks(player_ids, chunk_size)):
+    for index, chunk_items in enumerate(split_into_chunks(player_summaries, chunk_size)):
         chunk_file = CHUNKS_DIR / f"ids_chunk_{index:03d}.json"
-        save_json(chunk_file, chunk_ids)
-        chunk_map.append({"chunk_index": index, "ids_file": chunk_file.name, "count": len(chunk_ids)})
+        save_json(chunk_file, chunk_items)
+        chunk_map.append({"chunk_index": index, "ids_file": chunk_file.name, "count": len(chunk_items)})
 
     save_json(OUTPUT_DIR / "chunks_manifest.json", chunk_map)
     print(json.dumps({"chunks": chunk_map, "count": len(chunk_map)}))
@@ -115,12 +119,29 @@ def process_chunk(chunk_index):
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     manifest = load_json(OUTPUT_DIR / "chunks_manifest.json", [])
     chunk_info = next(item for item in manifest if item["chunk_index"] == chunk_index)
-    chunk_ids = load_json(CHUNKS_DIR / chunk_info["ids_file"], [])
+    chunk_items = load_json(CHUNKS_DIR / chunk_info["ids_file"], [])
+    if chunk_items and isinstance(chunk_items[0], dict):
+        chunk_summaries = {str(item["pesdb_id"]): item for item in chunk_items}
+        chunk_ids = list(chunk_summaries)
+    else:
+        chunk_ids = [str(player_id) for player_id in chunk_items]
+        chunk_summaries = {player_id: {"pesdb_id": player_id} for player_id in chunk_ids}
 
     session = build_session()
+    previous_players = fetch_previous_repo_json(os.getenv("GITHUB_JSON_PATH", "data/pesdb_players_it.json"))
+    previous_index = index_players_by_id(previous_players)
     players = []
+    cached_players = []
     errors = []
+    decision_counts = {}
     for idx, player_id in enumerate(chunk_ids, start=1):
+        summary = chunk_summaries.get(str(player_id), {"pesdb_id": str(player_id)})
+        should_scrape, reason = should_scrape_player(player_id, summary, previous_index)
+        decision_counts[reason] = decision_counts.get(reason, 0) + 1
+        if not should_scrape:
+            cached_players.append(previous_index[str(player_id)])
+            print(f"[CHUNK {chunk_index}] {idx}/{len(chunk_ids)} player {player_id} riusato da cache")
+            continue
         if idx > 1 and (idx - 1) % CHUNK_COOLDOWN_EVERY == 0:
             print(f"[CHUNK {chunk_index}] cooldown dopo {idx - 1} player, attendo {CHUNK_COOLDOWN_SECONDS}s e resetto la sessione")
             time.sleep(CHUNK_COOLDOWN_SECONDS)
@@ -140,8 +161,10 @@ def process_chunk(chunk_index):
     chunk_payload = {
         "chunk_index": chunk_index,
         "players": players,
+        "cached_players": cached_players,
         "errors": errors,
         "requested_ids": chunk_ids,
+        "decision_counts": decision_counts,
     }
     save_json(CHUNKS_DIR / f"players_chunk_{chunk_index:03d}.json", chunk_payload)
 
@@ -179,7 +202,9 @@ def merge(push_to_github):
         raise RuntimeError("chunks_manifest.json non trovato o vuoto")
 
     merged_players = []
+    merged_cached_players = []
     merged_errors = []
+    merged_decision_counts = {}
     all_ids = []
     failed_player_ids = []
     missing_chunks = []
@@ -190,13 +215,16 @@ def merge(push_to_github):
             continue
         chunk_payload = load_json(chunk_file, {})
         merged_players.extend(chunk_payload.get("players", []))
+        merged_cached_players.extend(chunk_payload.get("cached_players", []))
         merged_errors.extend(chunk_payload.get("errors", []))
+        for key, value in chunk_payload.get("decision_counts", {}).items():
+            merged_decision_counts[key] = merged_decision_counts.get(key, 0) + int(value)
         all_ids.extend(chunk_payload.get("requested_ids", []))
         failed_player_ids.extend(error["player_id"] for error in chunk_payload.get("errors", []))
 
     if missing_chunks:
         raise RuntimeError(f"Chunk mancanti nel merge: {len(missing_chunks)}. Esempi: {missing_chunks[:5]}")
-    if not merged_players:
+    if not merged_players and not merged_cached_players:
         raise RuntimeError("Nessun giocatore trovato nei chunk elaborati")
 
     if failed_player_ids:
@@ -210,11 +238,23 @@ def merge(push_to_github):
         unique_players[str(player.get("player_id"))] = player
     merged_players = list(unique_players.values())
 
-    raw_df = pd.DataFrame(merged_players)
     MERGED_DIR.mkdir(parents=True, exist_ok=True)
+    raw_df = pd.DataFrame(merged_players)
     raw_df.to_csv(MERGED_DIR / "pesdb_players_raw.csv", index=False, encoding="utf-8-sig")
 
-    final_df = transform_dataframe(raw_df, effective_excluded_columns, custom_column_names, custom_translations)
+    final_players = []
+    if merged_players:
+        final_df = transform_dataframe(raw_df, effective_excluded_columns, custom_column_names, custom_translations)
+        final_players.extend(json.loads(final_df.to_json(orient="records", force_ascii=False)))
+    final_players.extend(merged_cached_players)
+
+    unique_final_players = {}
+    for player in final_players:
+        player_id = str(player.get("pesdb_id") or player.get("player_id") or "").strip()
+        if player_id:
+            unique_final_players[player_id] = player
+    final_players = list(unique_final_players.values())
+    final_df = pd.DataFrame(final_players)
     final_df.to_json(FINAL_JSON_FILE, orient="records", force_ascii=False)
     final_df.to_csv(FINAL_CSV_FILE, index=False, encoding="utf-8-sig")
     current_players = json.loads(FINAL_JSON_FILE.read_text(encoding="utf-8"))
@@ -234,6 +274,11 @@ def merge(push_to_github):
             "added_players_count": diff_payload["added_players_count"],
             "removed_players_count": diff_payload["removed_players_count"],
             "changed_players_count": diff_payload["changed_players_count"],
+            "scraped_players_count": len(merged_players),
+            "cached_players_count": len(merged_cached_players),
+            "incremental_mode": INCREMENTAL_MODE,
+            "incremental_refresh_buckets": INCREMENTAL_REFRESH_BUCKETS,
+            "incremental_decision_counts": merged_decision_counts,
             **quality_payload,
         }
     )
