@@ -31,6 +31,11 @@ DETAIL_RETRY_BASE_SECONDS = 8
 FINAL_RECOVERY_SLEEP_SECONDS = 12
 CHUNK_COOLDOWN_EVERY = 150
 CHUNK_COOLDOWN_SECONDS = 90
+FAST_FAIL_RATE_LIMIT_IN_CHUNKS = os.getenv("PESDB_FAST_FAIL_429", "1").lower() not in {
+    "0",
+    "false",
+    "no",
+}
 
 OUTPUT_DIR = Path(__file__).resolve().parent / "output"
 MODIFICATIONS_FILE = Path(__file__).resolve().parent / "file_modifiche.xlsx"
@@ -406,6 +411,20 @@ def extract_player_details(session, player_id):
 
 
 def extract_player_details_with_retry(session, player_id, max_attempts=DETAIL_RETRY_ATTEMPTS):
+    return extract_player_details_with_retry_mode(
+        session,
+        player_id,
+        max_attempts=max_attempts,
+        fast_fail_rate_limit=False,
+    )
+
+
+def extract_player_details_with_retry_mode(
+    session,
+    player_id,
+    max_attempts=DETAIL_RETRY_ATTEMPTS,
+    fast_fail_rate_limit=False,
+):
     last_error = None
     for attempt in range(1, max_attempts + 1):
         try:
@@ -415,13 +434,21 @@ def extract_player_details_with_retry(session, player_id, max_attempts=DETAIL_RE
             status_code = exc.response.status_code if exc.response is not None else None
             if status_code not in {429, 500, 502, 503, 504}:
                 raise
+            if status_code == 429 and fast_fail_rate_limit:
+                print(f"[RATE LIMIT] player {player_id}: spostato al recupero finale")
+                raise
+            retry_after = exc.response.headers.get("Retry-After") if exc.response is not None else None
         except requests.RequestException as exc:
             last_error = exc
+            retry_after = None
 
         if attempt == max_attempts:
             break
 
-        sleep_seconds = DETAIL_RETRY_BASE_SECONDS * attempt
+        if retry_after and retry_after.isdigit():
+            sleep_seconds = int(retry_after)
+        else:
+            sleep_seconds = DETAIL_RETRY_BASE_SECONDS * attempt + random.uniform(0, 4)
         print(f"[RETRY] player {player_id} tentativo {attempt}/{max_attempts} fallito, attendo {sleep_seconds}s")
         time.sleep(sleep_seconds)
 

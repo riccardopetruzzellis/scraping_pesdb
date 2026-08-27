@@ -18,6 +18,7 @@ from scraping_pesdb_unificato import (
     FINAL_JSON_FILE,
     FINAL_META_FILE,
     REQUEST_TIMEOUT,
+    FAST_FAIL_RATE_LIMIT_IN_CHUNKS,
     OUTPUT_DIR,
     PAGE_LOG_FILE,
     RAW_IDS_FILE,
@@ -25,7 +26,7 @@ from scraping_pesdb_unificato import (
     build_metadata,
     build_session,
     extract_all_player_ids,
-    extract_player_details_with_retry,
+    extract_player_details_with_retry_mode,
     load_custom_rules,
     load_json,
     recover_missing_players,
@@ -38,6 +39,7 @@ import time
 
 CHUNKS_DIR = OUTPUT_DIR / "chunks"
 MERGED_DIR = OUTPUT_DIR / "merged"
+MAX_PLAYER_COUNT_DROP_RATIO = float(os.getenv("MAX_PLAYER_COUNT_DROP_RATIO", "0.005"))
 
 
 def github_request_session():
@@ -125,7 +127,13 @@ def process_chunk(chunk_index):
             session = build_session()
         print(f"[CHUNK {chunk_index}] {idx}/{len(chunk_ids)} player {player_id}")
         try:
-            players.append(extract_player_details_with_retry(session, player_id))
+            players.append(
+                extract_player_details_with_retry_mode(
+                    session,
+                    player_id,
+                    fast_fail_rate_limit=FAST_FAIL_RATE_LIMIT_IN_CHUNKS,
+                )
+            )
         except Exception as exc:
             errors.append({"player_id": player_id, "error": str(exc)})
 
@@ -136,6 +144,30 @@ def process_chunk(chunk_index):
         "requested_ids": chunk_ids,
     }
     save_json(CHUNKS_DIR / f"players_chunk_{chunk_index:03d}.json", chunk_payload)
+
+
+def validate_quality_gate(final_df, all_ids, previous_players):
+    current_count = len(final_df)
+    expected_count = len(set(str(player_id) for player_id in all_ids))
+    previous_count = len(previous_players)
+    if expected_count and current_count < expected_count:
+        raise RuntimeError(
+            f"Giocatori mancanti nel merge: estratti {current_count} su {expected_count} ID attesi"
+        )
+    if previous_count:
+        max_drop = max(1, int(previous_count * MAX_PLAYER_COUNT_DROP_RATIO))
+        dropped = previous_count - current_count
+        if dropped > max_drop:
+            raise RuntimeError(
+                "Estrazione sotto soglia qualità: "
+                f"{current_count} giocatori contro {previous_count} precedenti "
+                f"(drop {dropped}, massimo consentito {max_drop})."
+            )
+    return {
+        "previous_players_count": previous_count,
+        "quality_expected_player_ids": expected_count,
+        "quality_max_drop_ratio": MAX_PLAYER_COUNT_DROP_RATIO,
+    }
 
 
 def merge(push_to_github):
@@ -187,6 +219,7 @@ def merge(push_to_github):
     final_df.to_csv(FINAL_CSV_FILE, index=False, encoding="utf-8-sig")
     current_players = json.loads(FINAL_JSON_FILE.read_text(encoding="utf-8"))
     previous_players = fetch_previous_repo_json(os.getenv("GITHUB_JSON_PATH", "data/pesdb_players_it.json"))
+    quality_payload = validate_quality_gate(final_df, all_ids, previous_players)
     diff_payload = build_diff(previous_players, current_players)
     FINAL_DIFF_FILE.write_text(json.dumps(diff_payload, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
 
@@ -201,12 +234,9 @@ def merge(push_to_github):
             "added_players_count": diff_payload["added_players_count"],
             "removed_players_count": diff_payload["removed_players_count"],
             "changed_players_count": diff_payload["changed_players_count"],
+            **quality_payload,
         }
     )
-    if len(final_df) < len(all_ids):
-        raise RuntimeError(
-            f"Giocatori mancanti nel merge: estratti {len(final_df)} su {len(all_ids)} ID attesi"
-        )
     FINAL_META_FILE.write_text(json.dumps(metadata, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
 
     if push_to_github:
