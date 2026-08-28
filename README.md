@@ -122,6 +122,11 @@ Variabili utili:
 - `PESDB_INCREMENTAL_REFRESH_BUCKETS=1` equivale a riscaricare tutti i dettagli.
 - `PESDB_SKIP_SCHEDULED_WHEN_CHANGELOG=1` evita il refresh periodico quando PESDB fornisce gia' la lista `Modified Players`;
 - `PESDB_MAX_FINAL_RECOVERY_PLAYERS=40` limita il recupero finale dei nuovi giocatori senza cache, evitando timeout nel merge.
+- `PESDB_DETAIL_SLEEP_SECONDS=4` rallenta anche i dettagli scaricati nei chunk, evitando raffiche di richieste a PESDB;
+- `PESDB_CHUNK_RATE_LIMIT_ATTEMPTS=2` ritenta una scheda del chunk quando PESDB risponde con rate limit;
+- `PESDB_CHUNK_RATE_LIMIT_BACKOFF_SECONDS=180` attende prima del retry in caso di rate limit.
+
+Se una scheda gia' presente nel JSON precedente fallisce durante il chunk, viene mantenuta dal file precedente e non viene piu' mandata al recupero finale. Il recupero finale resta dedicato solo ai nuovi giocatori senza cache.
 
 ### Metadata prodotti
 

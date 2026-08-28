@@ -11,7 +11,10 @@ from scraping_pesdb_unificato import (
     CHUNK_SIZE,
     CHUNK_COOLDOWN_EVERY,
     CHUNK_COOLDOWN_SECONDS,
+    CHUNK_RATE_LIMIT_ATTEMPTS,
+    CHUNK_RATE_LIMIT_BACKOFF_SECONDS,
     DEFAULT_EXCLUDED_COLUMNS,
+    DETAIL_SLEEP_SECONDS,
     FINAL_DIFF_FILE,
     FINAL_CSV_FILE,
     FINAL_JSON_FILE,
@@ -48,6 +51,11 @@ import time
 CHUNKS_DIR = OUTPUT_DIR / "chunks"
 MERGED_DIR = OUTPUT_DIR / "merged"
 MAX_PLAYER_COUNT_DROP_RATIO = float(os.getenv("MAX_PLAYER_COUNT_DROP_RATIO", "0.005"))
+
+
+def http_status_code(error):
+    response = getattr(error, "response", None)
+    return response.status_code if response is not None else None
 
 
 def github_request_session():
@@ -158,16 +166,52 @@ def process_chunk(chunk_index):
             time.sleep(CHUNK_COOLDOWN_SECONDS)
             session = build_session()
         print(f"[CHUNK {chunk_index}] {idx}/{len(chunk_ids)} player {player_id}")
-        try:
-            players.append(
-                extract_player_details_with_retry_mode(
-                    session,
-                    player_id,
-                    fast_fail_rate_limit=FAST_FAIL_RATE_LIMIT_IN_CHUNKS,
+        player_error = None
+        for detail_attempt in range(1, CHUNK_RATE_LIMIT_ATTEMPTS + 1):
+            try:
+                players.append(
+                    extract_player_details_with_retry_mode(
+                        session,
+                        player_id,
+                        fast_fail_rate_limit=FAST_FAIL_RATE_LIMIT_IN_CHUNKS,
+                    )
                 )
+                player_error = None
+                break
+            except Exception as exc:
+                player_error = exc
+                if http_status_code(exc) == 429 and detail_attempt < CHUNK_RATE_LIMIT_ATTEMPTS:
+                    print(
+                        f"[RATE LIMIT] chunk {chunk_index} player {player_id}: "
+                        f"pausa {CHUNK_RATE_LIMIT_BACKOFF_SECONDS}s e nuovo tentativo"
+                    )
+                    time.sleep(CHUNK_RATE_LIMIT_BACKOFF_SECONDS)
+                    session = build_session()
+                    continue
+                break
+        if player_error is None:
+            time.sleep(DETAIL_SLEEP_SECONDS)
+            continue
+
+        error_payload = {
+            "player_id": player_id,
+            "error": str(player_error),
+            "status_code": http_status_code(player_error),
+        }
+        if str(player_id) in previous_index:
+            cached_players.append(previous_index[str(player_id)])
+            error_payload["reused_from_cache"] = True
+            decision_counts["failed_cached_fallback"] = decision_counts.get("failed_cached_fallback", 0) + 1
+            print(
+                f"[CHUNK {chunk_index}] player {player_id} fallito, "
+                "riusato dal JSON precedente"
             )
-        except Exception as exc:
-            errors.append({"player_id": player_id, "error": str(exc)})
+        else:
+            print(
+                f"[CHUNK {chunk_index}] player {player_id} fallito senza cache: "
+                f"{player_error}"
+            )
+        errors.append(error_payload)
 
     chunk_payload = {
         "chunk_index": chunk_index,
@@ -231,7 +275,11 @@ def merge(push_to_github):
         for key, value in chunk_payload.get("decision_counts", {}).items():
             merged_decision_counts[key] = merged_decision_counts.get(key, 0) + int(value)
         all_ids.extend(chunk_payload.get("requested_ids", []))
-        failed_player_ids.extend(error["player_id"] for error in chunk_payload.get("errors", []))
+        failed_player_ids.extend(
+            error["player_id"]
+            for error in chunk_payload.get("errors", [])
+            if not error.get("reused_from_cache")
+        )
 
     if missing_chunks:
         raise RuntimeError(f"Chunk mancanti nel merge: {len(missing_chunks)}. Esempi: {missing_chunks[:5]}")
