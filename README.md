@@ -120,6 +120,8 @@ Variabili utili:
 - `PESDB_CHANGELOG_MODIFIED_MODE=0` disattiva il refresh forzato dei giocatori presenti in `Modified Players`;
 - `PESDB_INCREMENTAL_REFRESH_BUCKETS=4` e' il default: circa un quarto delle schede viene comunque aggiornato a ogni run;
 - `PESDB_INCREMENTAL_REFRESH_BUCKETS=1` equivale a riscaricare tutti i dettagli.
+- `PESDB_SKIP_SCHEDULED_WHEN_CHANGELOG=1` evita il refresh periodico quando PESDB fornisce gia' la lista `Modified Players`;
+- `PESDB_MAX_FINAL_RECOVERY_PLAYERS=40` limita il recupero finale dei nuovi giocatori senza cache, evitando timeout nel merge.
 
 ### Metadata prodotti
 

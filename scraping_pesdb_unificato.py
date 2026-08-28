@@ -19,11 +19,11 @@ from bs4 import BeautifulSoup
 BASE_URL = "https://pesdb.net/efootball/"
 START_PAGE = 1
 END_PAGE = None
-LIST_SLEEP_MIN = 1.0
-LIST_SLEEP_MAX = 2.5
-DETAIL_SLEEP_SECONDS = 4
+LIST_SLEEP_MIN = float(os.getenv("PESDB_LIST_SLEEP_MIN", "1.0"))
+LIST_SLEEP_MAX = float(os.getenv("PESDB_LIST_SLEEP_MAX", "2.5"))
+DETAIL_SLEEP_SECONDS = float(os.getenv("PESDB_DETAIL_SLEEP_SECONDS", "4"))
 SAVE_EVERY = 50
-REQUEST_TIMEOUT = 20
+REQUEST_TIMEOUT = int(os.getenv("PESDB_REQUEST_TIMEOUT", "20"))
 MAX_EMPTY_PAGES = 2
 CHUNK_SIZE = 200
 LIST_RETRY_ATTEMPTS = 6
@@ -49,6 +49,12 @@ CHANGELOG_MODIFIED_MODE = os.getenv("PESDB_CHANGELOG_MODIFIED_MODE", "1").lower(
     "no",
 }
 INCREMENTAL_REFRESH_BUCKETS = max(1, int(os.getenv("PESDB_INCREMENTAL_REFRESH_BUCKETS", "4")))
+SKIP_SCHEDULED_REFRESH_WHEN_CHANGELOG = os.getenv("PESDB_SKIP_SCHEDULED_WHEN_CHANGELOG", "1").lower() not in {
+    "0",
+    "false",
+    "no",
+}
+MAX_FINAL_RECOVERY_PLAYERS = max(0, int(os.getenv("PESDB_MAX_FINAL_RECOVERY_PLAYERS", "40")))
 LIST_COMPARE_FIELDS = (
     "name",
     "role",
@@ -823,6 +829,8 @@ def should_scrape_player(player_id, summary, previous_index):
             return True, f"list_changed:{field}"
 
     if player_refresh_bucket(player_id) == current_refresh_bucket():
+        if summary.get("skip_scheduled_refresh"):
+            return False, "cached_changelog_window"
         return True, "scheduled_refresh"
 
     return False, "cached"
@@ -989,8 +997,10 @@ def run(start_page, end_page, excluded_columns):
 
     player_summaries, page_logs = extract_all_player_summaries(start_page, end_page)
     modified_player_ids = extract_modified_player_ids() if INCREMENTAL_MODE and CHANGELOG_MODIFIED_MODE else set()
+    skip_scheduled_refresh = bool(modified_player_ids) and SKIP_SCHEDULED_REFRESH_WHEN_CHANGELOG
     for summary in player_summaries:
         summary["listed_as_modified"] = summary["pesdb_id"] in modified_player_ids
+        summary["skip_scheduled_refresh"] = skip_scheduled_refresh
 
     player_ids = [summary["pesdb_id"] for summary in player_summaries]
     player_summaries_by_id = {summary["pesdb_id"]: summary for summary in player_summaries}

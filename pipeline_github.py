@@ -21,9 +21,11 @@ from scraping_pesdb_unificato import (
     FAST_FAIL_RATE_LIMIT_IN_CHUNKS,
     INCREMENTAL_MODE,
     INCREMENTAL_REFRESH_BUCKETS,
+    MAX_FINAL_RECOVERY_PLAYERS,
     OUTPUT_DIR,
     PAGE_LOG_FILE,
     RAW_IDS_FILE,
+    SKIP_SCHEDULED_REFRESH_WHEN_CHANGELOG,
     build_diff,
     build_metadata,
     build_session,
@@ -104,8 +106,10 @@ def prepare(end_page, chunk_size):
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     player_summaries, page_logs = extract_all_player_summaries(1, end_page)
     modified_player_ids = extract_modified_player_ids() if INCREMENTAL_MODE and CHANGELOG_MODIFIED_MODE else set()
+    skip_scheduled_refresh = bool(modified_player_ids) and SKIP_SCHEDULED_REFRESH_WHEN_CHANGELOG
     for summary in player_summaries:
         summary["listed_as_modified"] = summary["pesdb_id"] in modified_player_ids
+        summary["skip_scheduled_refresh"] = skip_scheduled_refresh
 
     player_ids = [item["pesdb_id"] for item in player_summaries]
     RAW_IDS_FILE.write_text("\n".join(player_ids), encoding="utf-8")
@@ -231,14 +235,48 @@ def merge(push_to_github):
 
     if missing_chunks:
         raise RuntimeError(f"Chunk mancanti nel merge: {len(missing_chunks)}. Esempi: {missing_chunks[:5]}")
-    if not merged_players and not merged_cached_players:
+    if not merged_players and not merged_cached_players and not failed_player_ids:
         raise RuntimeError("Nessun giocatore trovato nei chunk elaborati")
 
+    previous_players = fetch_previous_repo_json(os.getenv("GITHUB_JSON_PATH", "data/pesdb_players_it.json"))
+    previous_index = index_players_by_id(previous_players)
+    failed_player_ids = list(dict.fromkeys(str(player_id) for player_id in failed_player_ids))
+    failed_players_reused_from_cache = []
+    final_recovery_skipped = []
+    final_recovery_attempted = []
     if failed_player_ids:
-        print(f"[RECOVERY] Avvio recupero finale per {len(failed_player_ids)} player falliti nei chunk")
-        recovered_players, recovery_errors = recover_missing_players(failed_player_ids)
-        merged_players.extend(recovered_players)
-        merged_errors.extend(recovery_errors)
+        failed_players_reused_from_cache = [
+            player_id for player_id in failed_player_ids if player_id in previous_index
+        ]
+        for player_id in failed_players_reused_from_cache:
+            merged_cached_players.append(previous_index[player_id])
+
+        recovery_candidates = [
+            player_id for player_id in failed_player_ids if player_id not in previous_index
+        ]
+        final_recovery_attempted = recovery_candidates[:MAX_FINAL_RECOVERY_PLAYERS]
+        final_recovery_skipped = recovery_candidates[MAX_FINAL_RECOVERY_PLAYERS:]
+        if final_recovery_attempted:
+            print(
+                f"[RECOVERY] Avvio recupero finale per {len(final_recovery_attempted)} "
+                f"nuovi player senza cache"
+            )
+            recovered_players, recovery_errors = recover_missing_players(final_recovery_attempted)
+            merged_players.extend(recovered_players)
+            merged_errors.extend(recovery_errors)
+        if failed_players_reused_from_cache:
+            print(
+                f"[RECOVERY] {len(failed_players_reused_from_cache)} player falliti "
+                "riusati dal JSON precedente"
+            )
+        if final_recovery_skipped:
+            print(
+                f"[RECOVERY] {len(final_recovery_skipped)} recovery saltate per limite "
+                f"PESDB_MAX_FINAL_RECOVERY_PLAYERS={MAX_FINAL_RECOVERY_PLAYERS}"
+            )
+
+    if not merged_players and not merged_cached_players:
+        raise RuntimeError("Nessun giocatore trovato nei chunk elaborati")
 
     unique_players = {}
     for player in merged_players:
@@ -269,7 +307,6 @@ def merge(push_to_github):
     final_df.to_json(FINAL_JSON_FILE, orient="records", force_ascii=False)
     final_df.to_csv(FINAL_CSV_FILE, index=False, encoding="utf-8-sig")
     current_players = json.loads(FINAL_JSON_FILE.read_text(encoding="utf-8"))
-    previous_players = fetch_previous_repo_json(os.getenv("GITHUB_JSON_PATH", "data/pesdb_players_it.json"))
     quality_payload = validate_quality_gate(final_df, all_ids, previous_players)
     diff_payload = build_diff(previous_players, current_players)
     FINAL_DIFF_FILE.write_text(json.dumps(diff_payload, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
@@ -287,6 +324,9 @@ def merge(push_to_github):
             "changed_players_count": diff_payload["changed_players_count"],
             "scraped_players_count": len(merged_players),
             "cached_players_count": len(merged_cached_players),
+            "failed_players_reused_from_cache_count": len(failed_players_reused_from_cache),
+            "final_recovery_attempted_count": len(final_recovery_attempted),
+            "final_recovery_skipped_count": len(final_recovery_skipped),
             "incremental_mode": INCREMENTAL_MODE,
             "incremental_refresh_buckets": INCREMENTAL_REFRESH_BUCKETS,
             "incremental_decision_counts": merged_decision_counts,
