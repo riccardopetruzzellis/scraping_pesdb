@@ -105,7 +105,8 @@ jobs:
         shell: bash
         run: |
           mkdir -p artifact
-          cp output/chunks_2027/result_chunk_${{ matrix.chunk_index }}.json artifact/
+          printf -v chunk_file 'result_chunk_%03d.json' "${{ matrix.chunk_index }}"
+          cp "output/chunks_2027/${chunk_file}" artifact/
       - uses: actions/upload-artifact@v4
         with:
           name: pesdb-2027-result-${{ matrix.chunk_index }}
