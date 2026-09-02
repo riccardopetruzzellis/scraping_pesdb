@@ -1,0 +1,161 @@
+name: PESDB 2027 Standard Players
+
+on:
+  schedule:
+    - cron: "00 13 * * 4"
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "Tipo di aggiornamento"
+        required: true
+        default: "incremental"
+        type: choice
+        options:
+          - incremental
+          - full
+      max_pages:
+        description: "Solo test: limita le pagine Standard (vuoto = tutte)"
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+env:
+  PESDB_2027_FORCE_FULL: ${{ github.event.inputs.mode == 'full' && '1' || '0' }}
+
+jobs:
+  prepare:
+    name: 1. Discover Standard players
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+      chunk_count: ${{ steps.matrix.outputs.chunk_count }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+      - run: pip install -r requirements.txt
+      - name: Collect Standard player URLs
+        shell: bash
+        run: |
+          args=(prepare --chunk-size 75)
+          if [ -n "${{ inputs.max_pages }}" ]; then
+            args+=(--max-pages "${{ inputs.max_pages }}")
+          fi
+          python pipeline_github_2027.py "${args[@]}"
+      - name: Publish discovery summary
+        run: cat output/standard_2027_prepare_summary.json >> "$GITHUB_STEP_SUMMARY"
+      - name: Export chunk matrix
+        id: matrix
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          manifest = json.loads(Path("output/standard_2027_manifest.json").read_text())
+          matrix = {"include": [{"chunk_index": item["chunk_index"]} for item in manifest]}
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              output.write(f"matrix={json.dumps(matrix)}\n")
+              output.write(f"chunk_count={len(manifest)}\n")
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pesdb-2027-prepared
+          path: |
+            output/standard_2027_manifest.json
+            output/standard_2027_pages.json
+            output/standard_2027_prepare_summary.json
+            output/chunks_2027/standard_chunk_*.json
+
+  approve-discovery:
+    name: 2. Approve discovered Standard players
+    needs: prepare
+    runs-on: ubuntu-latest
+    environment: pesdb-scrape-discovery-approval
+    steps:
+      - run: echo "Discovery approved. Starting detail scraping."
+
+  process-chunks:
+    name: 3. Scrape Standard player details
+    needs: [prepare, approve-discovery]
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix: ${{ fromJson(needs.prepare.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+      - run: pip install -r requirements.txt
+      - uses: actions/download-artifact@v4
+        with:
+          name: pesdb-2027-prepared
+          path: output
+      - name: Scrape chunk
+        run: python pipeline_github_2027.py process-chunk --chunk-index ${{ matrix.chunk_index }}
+      - name: Stage result
+        shell: bash
+        run: |
+          mkdir -p artifact
+          cp output/chunks_2027/result_chunk_${{ matrix.chunk_index }}.json artifact/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pesdb-2027-result-${{ matrix.chunk_index }}
+          path: artifact/
+
+  approve-publish:
+    name: 4. Approve merge and publish
+    needs: process-chunks
+    runs-on: ubuntu-latest
+    environment: pesdb-scrape-publish-approval
+    steps:
+      - run: echo "All chunks completed. Merge and publication approved."
+
+  merge:
+    name: 5. Merge and publish
+    needs: [prepare, process-chunks, approve-publish]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+      - run: pip install -r requirements.txt
+      - uses: actions/download-artifact@v4
+        with:
+          name: pesdb-2027-prepared
+          path: output
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: pesdb-2027-result-*
+          path: output/chunks_2027
+          merge-multiple: true
+      - name: Merge quality-checked data
+        run: python pipeline_github_2027.py merge
+      - name: Copy generated data
+        shell: bash
+        run: |
+          stamp="$(date -u +'%d_%m_%Y')"
+          cp output/pesdb_players_it.json data/pesdb_players_it.json
+          cp output/pesdb_players_it.csv data/pesdb_players_it.csv
+          cp output/pesdb_players_meta.json data/pesdb_players_meta.json
+          cp output/pesdb_players_diff.json data/pesdb_players_diff.json
+          cp output/pesdb_2027_state.json data/pesdb_2027_state.json
+          cp output/pesdb_players_it.json "data/estrazione_${stamp}.json"
+      - name: Commit generated data
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add data/pesdb_players_it.json data/pesdb_players_it.csv data/pesdb_players_meta.json data/pesdb_players_diff.json data/pesdb_2027_state.json data/estrazione_*.json
+          if git diff --cached --quiet; then
+            echo "No generated data changes to commit."
+          else
+            git commit -m "Update PESDB 2027 Standard players"
+            git push
+          fi

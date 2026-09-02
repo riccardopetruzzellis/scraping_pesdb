@@ -1,5 +1,23 @@
 # Deploy con GitHub Actions spezzato in chunk
 
+## Nuovo scraper PESDB 2027
+
+Usa `.github/workflows/weekly-standard-pesdb-2027.yml`.
+
+Il workflow acquisisce solo i giocatori con filtro PESDB `availability=standard`.
+Ha due punti di conferma: dopo la raccolta del catalogo e prima della pubblicazione.
+
+Per rendere effettive le conferme, in GitHub crea due Environments e imposta i
+required reviewers:
+
+- `pesdb-scrape-discovery-approval`
+- `pesdb-scrape-publish-approval`
+
+Senza required reviewers gli Environment non bloccano il workflow. Per il primo
+run seleziona `Run workflow`, modalita `full`; per i run successivi usa
+`incremental`. Il campo `max_pages` serve solo a provare la pipeline su un
+campione ridotto.
+
 Questa e' la soluzione migliore possibile senza dipendere da un tuo PC acceso:
 
 1. un job GitHub estrae tutti gli ID;
