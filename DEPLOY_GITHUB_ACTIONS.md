@@ -18,6 +18,11 @@ run seleziona `Run workflow`, modalita `full`; per i run successivi usa
 `incremental`. Il campo `max_pages` serve solo a provare la pipeline su un
 campione ridotto.
 
+La discovery iniziale delle 784 pagine Standard e volutamente limitata a una
+richiesta ogni 2,5 secondi, per evitare i rate limit di PESDB. Può richiedere
+circa 30-45 minuti. Se PESDB risponde con rate limit il workflow termina subito
+con un messaggio chiaro, senza accumulare attese di molti minuti.
+
 Questa e' la soluzione migliore possibile senza dipendere da un tuo PC acceso:
 
 1. un job GitHub estrae tutti gli ID;

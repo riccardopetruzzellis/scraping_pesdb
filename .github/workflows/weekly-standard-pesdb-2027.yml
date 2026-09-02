@@ -23,6 +23,9 @@ permissions:
 
 env:
   PESDB_2027_FORCE_FULL: ${{ github.event.inputs.mode == 'full' && '1' || '0' }}
+  PESDB_2027_LIST_DELAY_SECONDS: "2.5"
+  PESDB_2027_LIST_RETRIES: "2"
+  PYTHONUNBUFFERED: "1"
 
 jobs:
   prepare:

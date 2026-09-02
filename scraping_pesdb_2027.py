@@ -41,9 +41,12 @@ STATE_FILE = Path(__file__).resolve().parent / "data" / "pesdb_2027_state.json"
 PREVIOUS_DATA_FILE = Path(__file__).resolve().parent / "data" / "pesdb_players_it.json"
 
 REQUEST_TIMEOUT = int(os.getenv("PESDB_2027_REQUEST_TIMEOUT", "30"))
-LIST_DELAY_SECONDS = float(os.getenv("PESDB_2027_LIST_DELAY_SECONDS", "0.15"))
+# The public search endpoint starts rate-limiting sustained fast pagination.
+# Keep discovery intentionally conservative; it runs before any detail requests.
+LIST_DELAY_SECONDS = float(os.getenv("PESDB_2027_LIST_DELAY_SECONDS", "2.5"))
 DETAIL_DELAY_SECONDS = float(os.getenv("PESDB_2027_DETAIL_DELAY_SECONDS", "0.35"))
 REQUEST_RETRIES = int(os.getenv("PESDB_2027_REQUEST_RETRIES", "5"))
+LIST_RETRIES = int(os.getenv("PESDB_2027_LIST_RETRIES", "2"))
 RETRY_BASE_SECONDS = float(os.getenv("PESDB_2027_RETRY_BASE_SECONDS", "12"))
 CHUNK_SIZE = int(os.getenv("PESDB_2027_CHUNK_SIZE", "75"))
 FORCE_FULL = os.getenv("PESDB_2027_FORCE_FULL", "0").lower() in {"1", "true", "yes"}
@@ -72,11 +75,24 @@ def build_session() -> requests.Session:
     return session
 
 
-def request_with_retry(session: requests.Session, method: str, url: str, **kwargs) -> requests.Response:
+def request_with_retry(
+    session: requests.Session,
+    method: str,
+    url: str,
+    *,
+    max_attempts: int | None = None,
+    fail_fast_on_rate_limit: bool = False,
+    **kwargs,
+) -> requests.Response:
     last_error: Exception | None = None
-    for attempt in range(1, REQUEST_RETRIES + 1):
+    attempts = max_attempts or REQUEST_RETRIES
+    for attempt in range(1, attempts + 1):
         try:
             response = session.request(method, url, timeout=REQUEST_TIMEOUT, **kwargs)
+            if response.status_code == 429 and fail_fast_on_rate_limit:
+                raise RuntimeError(
+                    "PESDB rate limit during discovery. The workflow stopped before wasting time; retry later."
+                )
             if response.status_code not in {429, 500, 502, 503, 504}:
                 response.raise_for_status()
                 return response
@@ -84,12 +100,12 @@ def request_with_retry(session: requests.Session, method: str, url: str, **kwarg
         except requests.RequestException as exc:
             last_error = exc
 
-        if attempt == REQUEST_RETRIES:
+        if attempt == attempts:
             break
         retry_after = getattr(getattr(last_error, "response", None), "headers", {}).get("Retry-After")
         delay = float(retry_after) if retry_after and retry_after.isdigit() else RETRY_BASE_SECONDS * attempt
         delay += random.uniform(0, 1.5)
-        print(f"[RETRY] {method} {url} attempt {attempt}/{REQUEST_RETRIES}, waiting {delay:.1f}s")
+        print(f"[RETRY] {method} {url} attempt {attempt}/{attempts}, waiting {delay:.1f}s", flush=True)
         time.sleep(delay)
     raise last_error or RuntimeError(f"Request failed for {url}")
 
@@ -150,6 +166,8 @@ def discover_standard_players(max_pages: int | None = None) -> tuple[list[dict],
             session,
             "GET",
             PLAYERS_URL,
+            max_attempts=LIST_RETRIES,
+            fail_fast_on_rate_limit=True,
             params={"availability": "standard", "page": page},
         )
         soup = BeautifulSoup(response.text, "html.parser")
@@ -160,7 +178,7 @@ def discover_standard_players(max_pages: int | None = None) -> tuple[list[dict],
             raise RuntimeError(f"No Standard players found on page {page}; source layout may have changed")
         for player in page_players:
             players_by_id[player["pesdb_id"]] = player
-        print(f"[DISCOVERY] Standard page {page}/{total_pages}: {len(page_players)} players")
+        print(f"[DISCOVERY] Standard page {page}/{total_pages}: {len(page_players)} players", flush=True)
         page += 1
         time.sleep(LIST_DELAY_SECONDS)
     return list(players_by_id.values()), logs
