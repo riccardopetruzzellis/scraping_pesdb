@@ -152,6 +152,7 @@ jobs:
           cp output/pesdb_2027_state.json data/pesdb_2027_state.json
           cp output/pesdb_players_it.json "data/estrazione_${stamp}.json"
       - name: Commit generated data
+        if: ${{ github.event_name == 'schedule' || github.event.inputs.max_pages == '' }}
         shell: bash
         run: |
           git config user.name "github-actions[bot]"

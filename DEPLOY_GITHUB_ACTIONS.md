@@ -16,7 +16,8 @@ required reviewers:
 Senza required reviewers gli Environment non bloccano il workflow. Per il primo
 run seleziona `Run workflow`, modalita `full`; per i run successivi usa
 `incremental`. Il campo `max_pages` serve solo a provare la pipeline su un
-campione ridotto.
+campione ridotto. Quando `max_pages` contiene un valore, il workflow completa
+la verifica tecnica ma non pubblica mai il dataset parziale nel repository.
 
 La discovery iniziale delle 784 pagine Standard e volutamente limitata a una
 richiesta ogni 2,5 secondi, per evitare i rate limit di PESDB. Può richiedere
