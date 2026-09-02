@@ -153,27 +153,44 @@ def parse_standard_result_cards(soup: BeautifulSoup) -> list[dict]:
     return players
 
 
-def discover_standard_players(max_pages: int | None = None) -> tuple[list[dict], list[dict]]:
+def discover_standard_players(
+    max_pages: int | None = None,
+    *,
+    start_page: int = 1,
+    end_page: int | None = None,
+) -> tuple[list[dict], list[dict]]:
+    if start_page < 1:
+        raise ValueError("start_page must be at least 1")
+    if end_page is not None and end_page < start_page:
+        raise ValueError("end_page must be greater than or equal to start_page")
+
     session = build_session()
     players_by_id: dict[str, dict] = {}
     logs: list[dict] = []
-    page = 1
+    page = start_page
     total_pages: int | None = None
-    while total_pages is None or page <= total_pages:
-        if max_pages is not None and page > max_pages:
+    last_page = end_page if end_page is not None else max_pages
+    while total_pages is None or page <= min(total_pages, last_page or total_pages):
+        if last_page is not None and page > last_page:
             break
         response = request_with_retry(
             session,
             "GET",
             PLAYERS_URL,
             max_attempts=LIST_RETRIES,
-            fail_fast_on_rate_limit=True,
             params={"availability": "standard", "page": page},
         )
         soup = BeautifulSoup(response.text, "html.parser")
         total_pages = parse_page_count(soup) if total_pages is None else total_pages
         page_players = parse_standard_result_cards(soup)
-        logs.append({"page": page, "players": len(page_players), "etag": response.headers.get("ETag", "")})
+        logs.append(
+            {
+                "page": page,
+                "total_pages": total_pages,
+                "players": len(page_players),
+                "etag": response.headers.get("ETag", ""),
+            }
+        )
         if not page_players:
             raise RuntimeError(f"No Standard players found on page {page}; source layout may have changed")
         for player in page_players:
@@ -317,8 +334,7 @@ def load_previous_index() -> dict[str, dict]:
     return {player_id: player for player in load_json(PREVIOUS_DATA_FILE, []) if (player_id := final_player_id(player))}
 
 
-def prepare(chunk_size: int = CHUNK_SIZE, max_pages: int | None = None) -> dict:
-    players, pages = discover_standard_players(max_pages=max_pages)
+def write_prepare_output(players: list[dict], pages: list[dict], chunk_size: int = CHUNK_SIZE) -> dict:
     CHUNKS_DIR.mkdir(parents=True, exist_ok=True)
     manifest = []
     for index, chunk in enumerate(split_into_chunks(players, chunk_size)):
@@ -331,6 +347,78 @@ def prepare(chunk_size: int = CHUNK_SIZE, max_pages: int | None = None) -> dict:
     save_json(OUTPUT_DIR / "standard_2027_prepare_summary.json", summary)
     print(json.dumps(summary))
     return summary
+
+
+def prepare(chunk_size: int = CHUNK_SIZE, max_pages: int | None = None) -> dict:
+    players, pages = discover_standard_players(max_pages=max_pages)
+    return write_prepare_output(players, pages, chunk_size)
+
+
+def prepare_discovery_plan(pages_per_shard: int, max_pages: int | None = None) -> dict:
+    if pages_per_shard < 1:
+        raise ValueError("pages_per_shard must be at least 1")
+
+    session = build_session()
+    response = request_with_retry(
+        session,
+        "GET",
+        PLAYERS_URL,
+        max_attempts=LIST_RETRIES,
+        params={"availability": "standard", "page": 1},
+    )
+    total_pages = parse_page_count(BeautifulSoup(response.text, "html.parser"))
+    selected_pages = min(total_pages, max_pages) if max_pages is not None else total_pages
+    ranges = [
+        {"start_page": start, "end_page": min(start + pages_per_shard - 1, selected_pages)}
+        for start in range(1, selected_pages + 1, pages_per_shard)
+    ]
+    plan = {
+        "total_pages": total_pages,
+        "selected_pages": selected_pages,
+        "pages_per_shard": pages_per_shard,
+        "ranges": ranges,
+    }
+    save_json(OUTPUT_DIR / "standard_2027_discovery_plan.json", plan)
+    print(json.dumps(plan))
+    return plan
+
+
+def discover_range(start_page: int, end_page: int) -> dict:
+    players, pages = discover_standard_players(start_page=start_page, end_page=end_page)
+    target = OUTPUT_DIR / "discovery" / f"standard_2027_pages_{start_page:04d}_{end_page:04d}.json"
+    save_json(target, {"start_page": start_page, "end_page": end_page, "players": players, "pages": pages})
+    summary = {"start_page": start_page, "end_page": end_page, "players": len(players), "pages": len(pages), "file": target.name}
+    print(json.dumps(summary))
+    return summary
+
+
+def assemble_discovery(chunk_size: int = CHUNK_SIZE) -> dict:
+    plan = load_json(OUTPUT_DIR / "standard_2027_discovery_plan.json", None)
+    if not plan:
+        raise RuntimeError("2027 discovery plan missing")
+    expected_ranges = {(item["start_page"], item["end_page"]) for item in plan["ranges"]}
+    source_files = sorted((OUTPUT_DIR / "discovery").glob("standard_2027_pages_*.json"))
+    players_by_id: dict[str, dict] = {}
+    pages_by_number: dict[int, dict] = {}
+    found_ranges: set[tuple[int, int]] = set()
+    for source_file in source_files:
+        payload = load_json(source_file, {})
+        page_range = (payload.get("start_page"), payload.get("end_page"))
+        if page_range not in expected_ranges:
+            continue
+        found_ranges.add(page_range)
+        for player in payload.get("players", []):
+            players_by_id[player["pesdb_id"]] = player
+        for page in payload.get("pages", []):
+            pages_by_number[int(page["page"])] = page
+    missing_ranges = expected_ranges - found_ranges
+    expected_pages = set(range(1, int(plan["selected_pages"]) + 1))
+    missing_pages = expected_pages - set(pages_by_number)
+    if missing_ranges or missing_pages:
+        raise RuntimeError(
+            f"Discovery is incomplete: {len(missing_ranges)} ranges and {len(missing_pages)} pages are missing"
+        )
+    return write_prepare_output(list(players_by_id.values()), [pages_by_number[number] for number in sorted(pages_by_number)], chunk_size)
 
 
 def process_chunk(chunk_index: int) -> dict:
