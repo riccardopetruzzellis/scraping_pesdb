@@ -285,37 +285,3 @@ jobs:
             git commit -m "Update PESDB 2027 Standard players"
             git push
           fi
-      - name: Notify FMC when the scrape is complete
-        env:
-          FMC_SCRAPER_PUSH_WEBHOOK_TOKEN: ${{ secrets.FMC_SCRAPER_PUSH_WEBHOOK_TOKEN }}
-        shell: bash
-        run: |
-          if [ -z "$FMC_SCRAPER_PUSH_WEBHOOK_TOKEN" ]; then
-            echo "::warning::FMC push notification skipped: configure FMC_SCRAPER_PUSH_WEBHOOK_TOKEN."
-            exit 0
-          fi
-          python - <<'PY' > scraper_push_payload.json
-          import json
-          import os
-          from pathlib import Path
-
-          metadata = json.loads(Path("output/pesdb_players_meta.json").read_text())
-
-          print(json.dumps({
-              "source_type": "PESDB_SCRAPER",
-              "source_id": metadata.get("generated_at", "weekly"),
-              "title": "Scraping PESDB completato",
-              "body": (
-                  f"Aggiornati {metadata.get('players_count', 0)} giocatori Standard: "
-                  f"{metadata.get('scraped_players_count', 0)} riscaricati, "
-                  f"{metadata.get('cached_players_count', 0)} riutilizzati."
-              ),
-              "action_type": "NAVIGATE",
-              "action_payload": "/adminDatabaseUpdatePanel",
-          }))
-          PY
-          curl --fail --retry 3 --retry-delay 3 \
-            --request POST "https://slfshsddlyesjdcirqfn.supabase.co/functions/v1/send-push-notification" \
-            --header "content-type: application/json" \
-            --header "x-fmc-scraper-token: $FMC_SCRAPER_PUSH_WEBHOOK_TOKEN" \
-            --data-binary @scraper_push_payload.json
