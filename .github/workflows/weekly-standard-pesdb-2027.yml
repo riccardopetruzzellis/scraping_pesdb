@@ -2,7 +2,9 @@ name: PESDB 2027 Standard Players
 
 on:
   schedule:
-    - cron: "00 13 * * 4"
+    # GitHub Actions uses UTC. The gate below keeps the effective run at
+    # 11:00 Europe/Rome across both daylight-saving time changes.
+    - cron: "0 9,10 * * 4"
   workflow_dispatch:
     inputs:
       mode:
@@ -27,8 +29,30 @@ env:
   PYTHONUNBUFFERED: "1"
 
 jobs:
+  scheduled_window:
+    name: Check scheduled Italian time
+    runs-on: ubuntu-latest
+    outputs:
+      should_run: ${{ steps.window.outputs.should_run }}
+    steps:
+      - id: window
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" != "schedule" ]; then
+            echo "should_run=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          hour="$(TZ=Europe/Rome date +%H)"
+          if [ "$hour" = "11" ]; then
+            echo "should_run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "should_run=false" >> "$GITHUB_OUTPUT"
+          fi
+
   prepare-discovery-plan:
     name: 1. Plan Standard player discovery
+    needs: scheduled_window
+    if: needs.scheduled_window.outputs.should_run == 'true'
     runs-on: ubuntu-latest
     outputs:
       matrix: ${{ steps.matrix.outputs.matrix }}
@@ -143,14 +167,26 @@ jobs:
   approve-discovery:
     name: 4. Approve discovered Standard players
     needs: assemble-discovery
+    if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     environment: pesdb-scrape-discovery-approval
     steps:
       - run: echo "Discovery approved. Starting detail scraping."
 
+  auto_approve_discovery:
+    name: 4. Auto-approve scheduled discovery
+    needs: assemble-discovery
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "Scheduled run approved automatically. Starting detail scraping."
+
   process-chunks:
     name: 5. Scrape Standard player details
-    needs: [assemble-discovery, approve-discovery]
+    needs: [assemble-discovery, approve-discovery, auto_approve_discovery]
+    if: >-
+      always() && needs['assemble-discovery'].result == 'success' &&
+      (needs['approve-discovery'].result == 'success' || needs.auto_approve_discovery.result == 'success')
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -182,14 +218,32 @@ jobs:
   approve-publish:
     name: 6. Approve merge and publish
     needs: process-chunks
+    if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     environment: pesdb-scrape-publish-approval
     steps:
       - run: echo "All chunks completed. Merge and publication approved."
 
+  auto_approve_publish:
+    name: 6. Auto-approve scheduled publication
+    needs: process-chunks
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "Scheduled run approved automatically. Merging and publishing."
+
   merge:
     name: 7. Merge and publish
-    needs: [assemble-discovery, process-chunks, approve-publish]
+    needs:
+      [
+        assemble-discovery,
+        process-chunks,
+        approve-publish,
+        auto_approve_publish,
+      ]
+    if: >-
+      always() && needs['assemble-discovery'].result == 'success' && needs['process-chunks'].result == 'success' &&
+      (needs['approve-publish'].result == 'success' || needs.auto_approve_publish.result == 'success')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -231,3 +285,37 @@ jobs:
             git commit -m "Update PESDB 2027 Standard players"
             git push
           fi
+      - name: Notify FMC when the scrape is complete
+        env:
+          FMC_SCRAPER_PUSH_WEBHOOK_TOKEN: ${{ secrets.FMC_SCRAPER_PUSH_WEBHOOK_TOKEN }}
+        shell: bash
+        run: |
+          if [ -z "$FMC_SCRAPER_PUSH_WEBHOOK_TOKEN" ]; then
+            echo "::warning::FMC push notification skipped: configure FMC_SCRAPER_PUSH_WEBHOOK_TOKEN."
+            exit 0
+          fi
+          python - <<'PY' > scraper_push_payload.json
+          import json
+          import os
+          from pathlib import Path
+
+          metadata = json.loads(Path("output/pesdb_players_meta.json").read_text())
+
+          print(json.dumps({
+              "source_type": "PESDB_SCRAPER",
+              "source_id": metadata.get("generated_at", "weekly"),
+              "title": "Scraping PESDB completato",
+              "body": (
+                  f"Aggiornati {metadata.get('players_count', 0)} giocatori Standard: "
+                  f"{metadata.get('scraped_players_count', 0)} riscaricati, "
+                  f"{metadata.get('cached_players_count', 0)} riutilizzati."
+              ),
+              "action_type": "NAVIGATE",
+              "action_payload": "/adminDatabaseUpdatePanel",
+          }))
+          PY
+          curl --fail --retry 3 --retry-delay 3 \
+            --request POST "https://slfshsddlyesjdcirqfn.supabase.co/functions/v1/send-push-notification" \
+            --header "content-type: application/json" \
+            --header "x-fmc-scraper-token: $FMC_SCRAPER_PUSH_WEBHOOK_TOKEN" \
+            --data-binary @scraper_push_payload.json
