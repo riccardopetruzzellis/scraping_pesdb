@@ -127,7 +127,7 @@ jobs:
         run: |
           python pipeline_github.py merge
 
-          extraction_stamp="$(date -u +'%d_%m_%Y')"
+          extraction_stamp="$(date -u +'%Y_%m_%d')"
           mkdir -p data
           cp output/pesdb_players_it.json data/pesdb_players_it.json
           cp output/pesdb_players_it.json "data/estrazione_${extraction_stamp}.json"

@@ -922,7 +922,7 @@ def push_outputs_to_github():
     )
 
     timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
-    extraction_stamp = datetime.now(timezone.utc).strftime("%d_%m_%Y")
+    extraction_stamp = datetime.now(timezone.utc).strftime("%Y_%m_%d")
     dated_json_path = f"data/estrazione_{extraction_stamp}.json"
     push_file_to_github(
         session,

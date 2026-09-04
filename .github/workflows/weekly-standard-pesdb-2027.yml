@@ -265,7 +265,7 @@ jobs:
       - name: Copy generated data
         shell: bash
         run: |
-          stamp="$(date -u +'%d_%m_%Y')"
+          stamp="$(date -u +'%Y_%m_%d')"
           cp output/pesdb_players_it.json data/pesdb_players_it.json
           cp output/pesdb_players_it.csv data/pesdb_players_it.csv
           cp output/pesdb_players_meta.json data/pesdb_players_meta.json
