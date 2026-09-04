@@ -37,6 +37,7 @@ SITE_ROOT = "https://pesdb.net"
 PLAYERS_URL = f"{SITE_ROOT}/efootball/players/"
 OUTPUT_DIR = Path(__file__).resolve().parent / "output"
 CHUNKS_DIR = OUTPUT_DIR / "chunks_2027"
+POSITION_REPAIR_DIR = OUTPUT_DIR / "position_repair_2027"
 STATE_FILE = Path(__file__).resolve().parent / "data" / "pesdb_2027_state.json"
 PREVIOUS_DATA_FILE = Path(__file__).resolve().parent / "data" / "pesdb_players_it.json"
 
@@ -237,7 +238,16 @@ def positions_payload(soup: BeautifulSoup) -> dict[str, object]:
     full_positions, partial_positions = [], []
     for zone in soup.select(".position-pitch-zone"):
         classes = zone.get("class", [])
-        position_class = next((item for item in classes if item.startswith("position-pitch-")), "")
+        # The generic ``position-pitch-zone`` class appears before the actual
+        # position class, so it must not be treated as a position code.
+        position_class = next(
+            (
+                item
+                for item in classes
+                if item.startswith("position-pitch-") and item != "position-pitch-zone"
+            ),
+            "",
+        )
         position = position_class.removeprefix("position-pitch-").upper()
         if position not in POSITION_CODES:
             continue
@@ -257,6 +267,21 @@ def positions_payload(soup: BeautifulSoup) -> dict[str, object]:
     for position in POSITION_CODES:
         payload[f"Pos_{position}"] = 2 if position in full_positions else (1 if position in partial_positions else 0)
     return payload
+
+
+def position_import_fields(soup: BeautifulSoup) -> dict[str, object]:
+    """Return only the FMC fields derived from PESDB's position pitch."""
+    payload = positions_payload(soup)
+    primary_code = normalize_text(str(payload["Position:"])).upper()
+    fields: dict[str, object] = {
+        "role": POSITION_TRANSLATIONS.get(primary_code, primary_code),
+        "ruoli_naturali": payload["Strong Positions"],
+        "ruoli_secondari": payload["Secondary Positions"],
+        "ruoli_utilizzabili": payload["Playable Positions"],
+    }
+    for position in POSITION_CODES:
+        fields[f"pos_{POSITION_TRANSLATIONS[position].lower()}"] = payload[f"Pos_{position}"]
+    return fields
 
 
 def parse_standard_player_detail(summary: dict) -> tuple[dict, dict]:
@@ -332,6 +357,111 @@ def final_player_id(player: dict) -> str:
 
 def load_previous_index() -> dict[str, dict]:
     return {player_id: player for player in load_json(PREVIOUS_DATA_FILE, []) if (player_id := final_player_id(player))}
+
+
+def prepare_position_repair(
+    input_file: Path = PREVIOUS_DATA_FILE,
+    chunk_size: int = CHUNK_SIZE,
+    player_limit: int | None = None,
+) -> dict:
+    """Split an existing export into position-only repair chunks.
+
+    This avoids repeating discovery and the full player-details transform when
+    PESDB changes only the layout of the positions pitch.
+    """
+    if chunk_size < 1:
+        raise ValueError("chunk_size must be at least 1")
+    players = load_json(input_file, [])
+    if player_limit is not None:
+        if player_limit < 1:
+            raise ValueError("player_limit must be at least 1")
+        players = players[:player_limit]
+    player_ids = [final_player_id(player) for player in players]
+    if not players or any(not player_id for player_id in player_ids):
+        raise RuntimeError("Position repair input must contain players with pesdb_id")
+
+    POSITION_REPAIR_DIR.mkdir(parents=True, exist_ok=True)
+    manifest = []
+    for index, player_ids_chunk in enumerate(split_into_chunks(player_ids, chunk_size)):
+        file_name = f"position_repair_chunk_{index:03d}.json"
+        save_json(POSITION_REPAIR_DIR / file_name, player_ids_chunk)
+        manifest.append({"chunk_index": index, "file": file_name, "count": len(player_ids_chunk)})
+    summary = {
+        "input_file": str(input_file),
+        "players": len(player_ids),
+        "chunks": len(manifest),
+        "chunk_size": chunk_size,
+    }
+    save_json(POSITION_REPAIR_DIR / "position_repair_manifest.json", manifest)
+    save_json(POSITION_REPAIR_DIR / "position_repair_summary.json", summary)
+    print(json.dumps(summary))
+    return summary
+
+
+def process_position_repair_chunk(chunk_index: int) -> dict:
+    manifest = load_json(POSITION_REPAIR_DIR / "position_repair_manifest.json", [])
+    chunk_info = next((item for item in manifest if int(item["chunk_index"]) == chunk_index), None)
+    if not chunk_info:
+        raise RuntimeError(f"Position repair chunk {chunk_index} is missing")
+    player_ids = load_json(POSITION_REPAIR_DIR / chunk_info["file"], [])
+    session = build_session()
+    updates, errors = [], []
+    for offset, player_id in enumerate(player_ids, start=1):
+        url = f"{SITE_ROOT}/efootball/?id={player_id}"
+        try:
+            response = request_with_retry(session, "GET", url)
+            fields = position_import_fields(BeautifulSoup(response.text, "html.parser"))
+            if not fields["ruoli_naturali"]:
+                raise RuntimeError("PESDB position pitch is empty")
+            updates.append({"pesdb_id": player_id, "fields": fields})
+            time.sleep(DETAIL_DELAY_SECONDS)
+        except Exception as exc:
+            errors.append({"player_id": player_id, "url": url, "error": str(exc)})
+        print(f"[POSITION REPAIR {chunk_index}] {offset}/{len(player_ids)} {player_id}", flush=True)
+    result = {"chunk_index": chunk_index, "updates": updates, "errors": errors}
+    save_json(POSITION_REPAIR_DIR / f"position_repair_result_{chunk_index:03d}.json", result)
+    return {"chunk_index": chunk_index, "updated": len(updates), "errors": len(errors)}
+
+
+def merge_position_repair(
+    input_file: Path = PREVIOUS_DATA_FILE,
+    output_file: Path = OUTPUT_DIR / "pesdb_players_it.json",
+) -> dict:
+    """Merge position-only chunks into an existing FMC JSON export."""
+    manifest = load_json(POSITION_REPAIR_DIR / "position_repair_manifest.json", [])
+    if not manifest:
+        raise RuntimeError("Position repair manifest missing")
+    players = load_json(input_file, [])
+    player_index = {final_player_id(player): player for player in players}
+    updated_ids, errors = set(), []
+    for chunk_info in manifest:
+        chunk_index = int(chunk_info["chunk_index"])
+        result = load_json(POSITION_REPAIR_DIR / f"position_repair_result_{chunk_index:03d}.json", None)
+        if result is None:
+            raise RuntimeError(f"Position repair result {chunk_index} is missing")
+        errors.extend(result["errors"])
+        for update in result["updates"]:
+            player_id = str(update["pesdb_id"])
+            if player_id not in player_index:
+                raise RuntimeError(f"Position repair returned unknown player {player_id}")
+            player_index[player_id].update(update["fields"])
+            updated_ids.add(player_id)
+    repaired_players = [player_index[final_player_id(player)] for player in players]
+    output_file.parent.mkdir(parents=True, exist_ok=True)
+    save_json(output_file, repaired_players)
+    pd.DataFrame(repaired_players).to_csv(output_file.with_suffix(".csv"), index=False, encoding="utf-8-sig")
+    metadata = {
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "source": "pesdb.net eFootball 2027 position-only repair",
+        "input_file": str(input_file),
+        "players": len(repaired_players),
+        "updated_players": len(updated_ids),
+        "errors": errors,
+        "has_errors": bool(errors),
+    }
+    save_json(POSITION_REPAIR_DIR / "position_repair_meta.json", metadata)
+    print(json.dumps({"players": len(repaired_players), "updated": len(updated_ids), "errors": len(errors)}))
+    return metadata
 
 
 def write_prepare_output(players: list[dict], pages: list[dict], chunk_size: int = CHUNK_SIZE) -> dict:

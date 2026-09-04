@@ -1,0 +1,146 @@
+name: Repair PESDB 2027 Standard Positions
+
+on:
+  workflow_dispatch:
+    inputs:
+      player_limit:
+        description: "Solo test: limita i giocatori (vuoto = tutti)"
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+env:
+  PESDB_2027_DETAIL_DELAY_SECONDS: "0.35"
+  PESDB_2027_REQUEST_RETRIES: "5"
+  PESDB_2027_RETRY_BASE_SECONDS: "12"
+  PYTHONUNBUFFERED: "1"
+
+jobs:
+  prepare:
+    name: 1. Prepare position-only repair
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+      - run: pip install -r requirements.txt
+      - name: Split the existing export into repair chunks
+        shell: bash
+        run: |
+          args=(prepare-position-repair --chunk-size 75)
+          if [ -n "${{ inputs.player_limit }}" ]; then
+            args+=(--player-limit "${{ inputs.player_limit }}")
+          fi
+          python pipeline_github_2027.py "${args[@]}"
+      - name: Export repair matrix
+        id: matrix
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          manifest = json.loads(Path("output/position_repair_2027/position_repair_manifest.json").read_text())
+          matrix = {"include": [{"chunk_index": item["chunk_index"]} for item in manifest]}
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              output.write(f"matrix={json.dumps(matrix)}\n")
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pesdb-2027-position-repair-prepared
+          path: output/position_repair_2027/
+
+  approve-repair:
+    name: 2. Approve position repair
+    needs: prepare
+    runs-on: ubuntu-latest
+    environment: pesdb-scrape-discovery-approval
+    steps:
+      - run: echo "Position-only repair approved. Starting player-page requests."
+
+  process-chunks:
+    name: 3. Repair Standard player positions
+    needs: [prepare, approve-repair]
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix: ${{ fromJson(needs.prepare.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+      - run: pip install -r requirements.txt
+      - uses: actions/download-artifact@v4
+        with:
+          name: pesdb-2027-position-repair-prepared
+          path: output/position_repair_2027
+      - name: Refresh only the position pitch
+        run: python pipeline_github_2027.py process-position-repair-chunk --chunk-index ${{ matrix.chunk_index }}
+      - name: Stage repair result
+        shell: bash
+        run: |
+          mkdir -p artifact
+          printf -v result_file 'position_repair_result_%03d.json' "${{ matrix.chunk_index }}"
+          cp "output/position_repair_2027/${result_file}" artifact/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pesdb-2027-position-repair-${{ matrix.chunk_index }}
+          path: artifact/
+
+  approve-publish:
+    name: 4. Approve repaired export
+    needs: process-chunks
+    runs-on: ubuntu-latest
+    environment: pesdb-scrape-publish-approval
+    steps:
+      - run: echo "Position-only repair completed. Publishing approved."
+
+  merge:
+    name: 5. Merge and publish repaired positions
+    needs: [prepare, process-chunks, approve-publish]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+      - run: pip install -r requirements.txt
+      - uses: actions/download-artifact@v4
+        with:
+          name: pesdb-2027-position-repair-prepared
+          path: output/position_repair_2027
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: pesdb-2027-position-repair-*
+          path: output/position_repair_2027
+          merge-multiple: true
+      - name: Merge repaired position fields
+        run: python pipeline_github_2027.py merge-position-repair
+      - name: Publish generated data
+        shell: bash
+        run: |
+          stamp="$(date -u +'%d_%m_%Y')"
+          cp output/pesdb_players_it.json data/pesdb_players_it.json
+          cp output/pesdb_players_it.csv data/pesdb_players_it.csv
+          cp output/pesdb_players_it.json "data/estrazione_${stamp}_posizioni_corrette.json"
+          cp output/position_repair_2027/position_repair_meta.json data/pesdb_players_positions_repair_meta.json
+      - name: Commit repaired export
+        if: ${{ inputs.player_limit == '' }}
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add data/pesdb_players_it.json data/pesdb_players_it.csv data/estrazione_*_posizioni_corrette.json data/pesdb_players_positions_repair_meta.json
+          if git diff --cached --quiet; then
+            echo "No position changes to commit."
+          else
+            git commit -m "Repair PESDB 2027 player positions"
+            git push
+          fi
