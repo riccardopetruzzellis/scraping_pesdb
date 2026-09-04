@@ -1,0 +1,65 @@
+name: Publish Existing PESDB 2027 Results
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_run_id:
+        description: "ID del run PESDB 2027 Standard Players da pubblicare"
+        required: true
+        type: string
+
+permissions:
+  actions: read
+  contents: write
+
+jobs:
+  publish:
+    name: Merge and publish saved results
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+      - run: pip install -r requirements.txt
+      - name: Download prepared player list
+        uses: actions/download-artifact@v4
+        with:
+          name: pesdb-2027-prepared
+          path: output
+          repository: ${{ github.repository }}
+          run-id: ${{ inputs.source_run_id }}
+          github-token: ${{ github.token }}
+      - name: Download saved scrape results
+        uses: actions/download-artifact@v4
+        with:
+          pattern: pesdb-2027-result-*
+          path: output/chunks_2027
+          merge-multiple: true
+          repository: ${{ github.repository }}
+          run-id: ${{ inputs.source_run_id }}
+          github-token: ${{ github.token }}
+      - name: Merge quality-checked data
+        run: python pipeline_github_2027.py merge
+      - name: Copy generated data
+        shell: bash
+        run: |
+          stamp="$(date -u +'%Y_%m_%d')"
+          cp output/pesdb_players_it.json data/pesdb_players_it.json
+          cp output/pesdb_players_it.csv data/pesdb_players_it.csv
+          cp output/pesdb_players_meta.json data/pesdb_players_meta.json
+          cp output/pesdb_players_diff.json data/pesdb_players_diff.json
+          cp output/pesdb_2027_state.json data/pesdb_2027_state.json
+          cp output/pesdb_players_it.json "data/estrazione_${stamp}.json"
+      - name: Commit generated data
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add data/pesdb_players_it.json data/pesdb_players_it.csv data/pesdb_players_meta.json data/pesdb_players_diff.json data/pesdb_2027_state.json data/estrazione_*.json
+          if git diff --cached --quiet; then
+            echo "No generated data changes to commit."
+          else
+            git commit -m "Publish PESDB 2027 Standard results"
+            git push
+          fi

@@ -164,29 +164,9 @@ jobs:
             output/standard_2027_prepare_summary.json
             output/chunks_2027/standard_chunk_*.json
 
-  approve-discovery:
-    name: 4. Approve discovered Standard players
-    needs: assemble-discovery
-    if: github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-latest
-    environment: pesdb-scrape-discovery-approval
-    steps:
-      - run: echo "Discovery approved. Starting detail scraping."
-
-  auto_approve_discovery:
-    name: 4. Auto-approve scheduled discovery
-    needs: assemble-discovery
-    if: github.event_name == 'schedule'
-    runs-on: ubuntu-latest
-    steps:
-      - run: echo "Scheduled run approved automatically. Starting detail scraping."
-
   process-chunks:
-    name: 5. Scrape Standard player details
-    needs: [assemble-discovery, approve-discovery, auto_approve_discovery]
-    if: >-
-      always() && needs['assemble-discovery'].result == 'success' &&
-      (needs['approve-discovery'].result == 'success' || needs.auto_approve_discovery.result == 'success')
+    name: 4. Scrape Standard player details
+    needs: assemble-discovery
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -215,35 +195,11 @@ jobs:
           name: pesdb-2027-result-${{ matrix.chunk_index }}
           path: artifact/
 
-  approve-publish:
-    name: 6. Approve merge and publish
-    needs: process-chunks
-    if: github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-latest
-    environment: pesdb-scrape-publish-approval
-    steps:
-      - run: echo "All chunks completed. Merge and publication approved."
-
-  auto_approve_publish:
-    name: 6. Auto-approve scheduled publication
-    needs: process-chunks
-    if: github.event_name == 'schedule'
-    runs-on: ubuntu-latest
-    steps:
-      - run: echo "Scheduled run approved automatically. Merging and publishing."
-
   merge:
-    name: 7. Merge and publish
-    needs:
-      [
-        assemble-discovery,
-        process-chunks,
-        approve-publish,
-        auto_approve_publish,
-      ]
+    name: 5. Merge and publish
+    needs: [assemble-discovery, process-chunks]
     if: >-
-      always() && needs['assemble-discovery'].result == 'success' && needs['process-chunks'].result == 'success' &&
-      (needs['approve-publish'].result == 'success' || needs.auto_approve_publish.result == 'success')
+      always() && needs['assemble-discovery'].result == 'success' && needs['process-chunks'].result == 'success'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
