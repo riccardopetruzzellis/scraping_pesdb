@@ -31,14 +31,20 @@ jobs:
           run-id: ${{ inputs.source_run_id }}
           github-token: ${{ github.token }}
       - name: Download saved scrape results
-        uses: actions/download-artifact@v4
-        with:
-          pattern: pesdb-2027-result-*
-          path: output/chunks_2027
-          merge-multiple: true
-          repository: ${{ github.repository }}
-          run-id: ${{ inputs.source_run_id }}
-          github-token: ${{ github.token }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          rm -rf downloaded-artifacts
+          mkdir -p output/chunks_2027
+          gh run download "${{ inputs.source_run_id }}" --repo "${{ github.repository }}" --dir downloaded-artifacts
+          find downloaded-artifacts -type f -name 'result_chunk_*.json' -exec cp {} output/chunks_2027/ \;
+          result_count="$(find output/chunks_2027 -type f -name 'result_chunk_*.json' | wc -l)"
+          if [ "$result_count" -eq 0 ]; then
+            echo "No saved chunk results were found in run ${{ inputs.source_run_id }}."
+            exit 1
+          fi
+          echo "Recovered $result_count saved chunk results."
       - name: Merge quality-checked data
         run: python pipeline_github_2027.py merge
       - name: Copy generated data
