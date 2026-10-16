@@ -51,6 +51,7 @@ LIST_RETRIES = int(os.getenv("PESDB_2027_LIST_RETRIES", "2"))
 RETRY_BASE_SECONDS = float(os.getenv("PESDB_2027_RETRY_BASE_SECONDS", "12"))
 CHUNK_SIZE = int(os.getenv("PESDB_2027_CHUNK_SIZE", "75"))
 FORCE_FULL = os.getenv("PESDB_2027_FORCE_FULL", "0").lower() in {"1", "true", "yes"}
+DETAIL_PARSER_VERSION = 2
 
 # PESDB 2027 renamed a few entries compared with the labels used by the
 # historical FMC translation rules. Convert them before the common transform.
@@ -228,8 +229,39 @@ def pipe_values(section: BeautifulSoup | None) -> str:
     if not section:
         return ""
     return " | ".join(
-        normalize_site_value(item.get_text(" ", strip=True)) for item in section.select(".skill-chips span")
+        normalize_site_value(item.get_text(" ", strip=True)) for item in section.select(".skill-chips > span, .skill-chips > a")
     )
+
+
+def extract_skill_lists(soup: BeautifulSoup) -> dict[str, str]:
+    """Distinguish a genuinely empty skill list from an unrecognized page."""
+    script = soup.find("script", id="player-progression-data")
+    compare = {}
+    if script:
+        compare = json.loads(script.get_text()).get("compare", {})
+    result = {}
+    for title, key in (("Player Skills", "playerSkills"), ("AI Playing Styles", "aiPlayingStyles")):
+        if key in compare:
+            values = compare[key]
+            if not isinstance(values, list) or any(not isinstance(value, str) or not value.strip() for value in values):
+                raise RuntimeError(f"Invalid PESDB {title} data")
+            result[title] = " | ".join(normalize_site_value(value) for value in values)
+            continue
+        heading = next((h for h in soup.find_all("h2") if normalize_text(h.get_text(" ", strip=True)) == title), None)
+        section = heading.parent if heading else None
+        chips = section.select_one(".skill-chips") if section else None
+        if chips is not None:
+            value = pipe_values(section)
+            if value:
+                result[title] = value
+                continue
+        if section is not None and normalize_text(section.get_text(" ", strip=True)).lower() in {
+            f"{title.lower()} none", f"{title.lower()} no {title.lower()}"
+        }:
+            result[title] = ""
+            continue
+        raise RuntimeError(f"Cannot read PESDB {title}; refusing to export an unknown empty value")
+    return result
 
 
 def positions_payload(soup: BeautifulSoup) -> dict[str, object]:
@@ -324,10 +356,9 @@ def parse_standard_player_detail(summary: dict) -> tuple[dict, dict]:
             section = "Att" if "Attacking" in label.get_text() else "Def"
             styles.append(f"{section}:{normalize_site_value(value.get_text(' ', strip=True))}")
     player["Playing Style"] = " | ".join(styles)
-    skills = {normalize_text(section.find("h2").get_text(" ", strip=True)): section for section in soup.select(".skills-grid section") if section.find("h2")}
-    player["Player Skills"] = pipe_values(skills.get("Player Skills"))
-    player["AI Playing Styles"] = pipe_values(skills.get("AI Playing Styles"))
+    player.update(extract_skill_lists(soup))
     state = {
+        "parser_version": DETAIL_PARSER_VERSION,
         "url": summary["url"],
         "etag": response.headers.get("ETag", ""),
         "last_modified": response.headers.get("Last-Modified", ""),
@@ -564,7 +595,7 @@ def process_chunk(chunk_index: int) -> dict:
         prior_state = state.get(player_id, {})
         try:
             unchanged = False
-            if not FORCE_FULL and prior_state and player_id in previous and prior_state.get("url") == summary["url"]:
+            if not FORCE_FULL and prior_state.get("parser_version") == DETAIL_PARSER_VERSION and player_id in previous and prior_state.get("url") == summary["url"]:
                 head = request_with_retry(session, "HEAD", summary["url"])
                 etag = head.headers.get("ETag", "")
                 last_modified = head.headers.get("Last-Modified", "")
@@ -583,7 +614,7 @@ def process_chunk(chunk_index: int) -> dict:
                 time.sleep(DETAIL_DELAY_SECONDS)
         except Exception as exc:
             errors.append({"player_id": player_id, "url": summary["url"], "error": str(exc)})
-            if player_id in previous:
+            if player_id in previous and prior_state.get("parser_version") == DETAIL_PARSER_VERSION:
                 cached.append(previous[player_id])
                 if prior_state:
                     state_updates[player_id] = prior_state
@@ -622,6 +653,13 @@ def merge() -> dict:
         missing = len(ordered_ids) - len(final_players)
         raise RuntimeError(f"Quality gate failed: {missing} Standard players are missing")
 
+    players_with_skills = sum(
+        any(key.lower() == "player_skills_1" and bool(value) for key, value in player.items())
+        for player in final_players
+    )
+    if len(final_players) >= 100 and not players_with_skills:
+        raise RuntimeError("Quality gate failed: all exported Player Skills are empty")
+
     previous = load_json(PREVIOUS_DATA_FILE, [])
     final_df = pd.DataFrame(final_players)
     metadata = {
@@ -633,6 +671,7 @@ def merge() -> dict:
         "missing_players_count": 0,
         "scraped_players_count": len(raw_players),
         "cached_players_count": len(cached_players),
+        "players_with_skills_count": players_with_skills,
         "errors": errors,
         "columns": list(final_df.columns),
         "has_errors": bool(errors),

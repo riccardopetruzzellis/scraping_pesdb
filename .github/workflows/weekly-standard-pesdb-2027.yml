@@ -41,6 +41,8 @@ jobs:
         with:
           python-version: "3.11"
       - run: pip install -r requirements.txt
+      - name: Check player skills parser
+        run: python -m unittest test_player_skills -v
       - name: Read pages and create ranges
         shell: bash
         run: |
