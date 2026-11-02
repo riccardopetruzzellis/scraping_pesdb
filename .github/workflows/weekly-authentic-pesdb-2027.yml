@@ -1,0 +1,189 @@
+name: PESDB 2027 Serie A Authentic Players
+
+on:
+  schedule:
+    # GitHub Actions uses UTC. The gate below keeps the effective run at
+    # 12:00 Europe/Rome on Friday across both daylight-saving time changes.
+    # Friday (not Thursday) so it never overlaps the Standard run, which starts
+    # Thursday and can last until Friday morning.
+    - cron: "0 10,11 * * 5"
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "Tipo di aggiornamento"
+        required: true
+        default: "incremental"
+        type: choice
+        options: [incremental, full]
+      max_pages:
+        description: "Solo test: limita le pagine Authentic (vuoto = tutte)"
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: pesdb-authentic-2027
+  cancel-in-progress: false
+
+env:
+  PESDB_CATALOG: authentic
+  PESDB_2027_FORCE_FULL: ${{ github.event.inputs.mode == 'full' && '1' || '0' }}
+  PESDB_2027_LIST_DELAY_SECONDS: "2.5"
+  PESDB_2027_LIST_RETRIES: "3"
+  PESDB_2027_RETRY_BASE_SECONDS: "15"
+  # Authentic detail pages rate-limit at the 0.35 s default (local run on
+  # 02/11/2026 got Retry-After 3600 after ~290 pages, then 86400 after ~525 more at 3 s):
+  # 4 s and one chunk at a time.
+  PESDB_2027_DETAIL_DELAY_SECONDS: "4"
+  PYTHONUNBUFFERED: "1"
+
+jobs:
+  scheduled_window:
+    name: Check scheduled Italian time
+    runs-on: ubuntu-latest
+    outputs:
+      should_run: ${{ steps.window.outputs.should_run }}
+    steps:
+      - id: window
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" != "schedule" ]; then
+            echo "should_run=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          hour="$(TZ=Europe/Rome date +%H)"
+          if [ "$hour" = "12" ]; then
+            echo "should_run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "should_run=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  prepare:
+    name: 1. Discover Serie A authentic players
+    needs: scheduled_window
+    if: needs.scheduled_window.outputs.should_run == 'true'
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+      - run: pip install -r requirements.txt
+      - name: Collect authentic player URLs (single pass, ~26 pages)
+        shell: bash
+        run: |
+          args=(--catalog authentic prepare --chunk-size 75)
+          if [ -n "${{ inputs.max_pages }}" ]; then
+            args+=(--max-pages "${{ inputs.max_pages }}")
+          fi
+          python pipeline_github_2027.py "${args[@]}"
+      - name: Publish discovery summary
+        run: cat output/authentic_2027_prepare_summary.json >> "$GITHUB_STEP_SUMMARY"
+      - name: Export chunk matrix
+        id: matrix
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          manifest = json.loads(Path("output/authentic_2027_manifest.json").read_text())
+          matrix = {"include": [{"chunk_index": item["chunk_index"]} for item in manifest]}
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              output.write(f"matrix={json.dumps(matrix)}\n")
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pesdb-authentic-2027-prepared
+          path: |
+            output/authentic_2027_manifest.json
+            output/authentic_2027_pages.json
+            output/authentic_2027_prepare_summary.json
+            output/chunks_authentic_2027/authentic_chunk_*.json
+
+  process-chunks:
+    name: 2. Scrape authentic player details
+    needs: prepare
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix: ${{ fromJson(needs.prepare.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+      - run: pip install -r requirements.txt
+      - uses: actions/download-artifact@v4
+        with:
+          name: pesdb-authentic-2027-prepared
+          path: output
+      - name: Scrape chunk
+        run: python pipeline_github_2027.py --catalog authentic process-chunk --chunk-index ${{ matrix.chunk_index }}
+      - name: Stage result
+        shell: bash
+        run: |
+          mkdir -p artifact
+          printf -v chunk_file 'result_chunk_%03d.json' "${{ matrix.chunk_index }}"
+          cp "output/chunks_authentic_2027/${chunk_file}" artifact/
+          # First authentic page without skills (parser check), when saved.
+          if [ -f output/debug_authentic_detail.html ]; then
+            cp output/debug_authentic_detail.html "artifact/debug_authentic_detail_${{ matrix.chunk_index }}.html"
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pesdb-authentic-2027-result-${{ matrix.chunk_index }}
+          path: artifact/
+
+  merge:
+    name: 3. Merge and publish
+    needs: [prepare, process-chunks]
+    if: >-
+      always() && needs.prepare.result == 'success' && needs['process-chunks'].result == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+      - run: pip install -r requirements.txt
+      - uses: actions/download-artifact@v4
+        with:
+          name: pesdb-authentic-2027-prepared
+          path: output
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: pesdb-authentic-2027-result-*
+          path: output/chunks_authentic_2027
+          merge-multiple: true
+      - name: Merge quality-checked data
+        run: python pipeline_github_2027.py --catalog authentic merge
+      - name: Copy generated data
+        shell: bash
+        run: |
+          stamp="$(date -u +'%Y_%m_%d')"
+          cp output/pesdb_authentic_it.json data/pesdb_authentic_it.json
+          cp output/pesdb_authentic_it.csv data/pesdb_authentic_it.csv
+          cp output/pesdb_authentic_meta.json data/pesdb_authentic_meta.json
+          cp output/pesdb_authentic_diff.json data/pesdb_authentic_diff.json
+          cp output/pesdb_authentic_state.json data/pesdb_authentic_state.json
+          cp output/pesdb_authentic_it.json "data/estrazione_authentic_${stamp}.json"
+      - name: Commit generated data
+        if: ${{ github.event_name == 'schedule' || github.event.inputs.max_pages == '' }}
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add data/pesdb_authentic_it.json data/pesdb_authentic_it.csv data/pesdb_authentic_meta.json data/pesdb_authentic_diff.json data/pesdb_authentic_state.json data/estrazione_authentic_*.json
+          if git diff --cached --quiet; then
+            echo "No generated authentic data changes to commit."
+          else
+            git commit -m "Update PESDB 2027 Serie A authentic players"
+            git pull --rebase
+            git push
+          fi

@@ -12,6 +12,7 @@ import os
 import random
 import re
 import time
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urljoin
@@ -34,12 +35,114 @@ from scraping_pesdb_unificato import (
 
 
 SITE_ROOT = "https://pesdb.net"
-PLAYERS_URL = f"{SITE_ROOT}/efootball/players/"
-OUTPUT_DIR = Path(__file__).resolve().parent / "output"
-CHUNKS_DIR = OUTPUT_DIR / "chunks_2027"
-POSITION_REPAIR_DIR = OUTPUT_DIR / "position_repair_2027"
-STATE_FILE = Path(__file__).resolve().parent / "data" / "pesdb_2027_state.json"
-PREVIOUS_DATA_FILE = Path(__file__).resolve().parent / "data" / "pesdb_players_it.json"
+BASE_DIR = Path(__file__).resolve().parent
+DATA_DIR = BASE_DIR / "data"
+OUTPUT_DIR = BASE_DIR / "output"
+SERIE_A_LEAGUE_ID = "10"
+
+
+@dataclass(frozen=True)
+class CatalogConfig:
+    """Everything that differs between the scraped PESDB catalogues.
+
+    ``standard`` keeps the historical URLs and file names unchanged.
+    ``authentic`` scrapes the Serie A authentic cards into separate files.
+    """
+
+    name: str
+    players_url: str
+    list_params: tuple[tuple[str, str], ...]
+    chunks_dir: Path
+    position_repair_dir: Path
+    state_file: Path
+    previous_data_file: Path
+    output_stem: str
+    work_prefix: str
+    scope: str
+
+    def list_query(self, page: int) -> dict[str, object]:
+        return {**dict(self.list_params), "page": page}
+
+    def output_file(self, suffix: str) -> Path:
+        return OUTPUT_DIR / f"{self.output_stem}_{suffix}"
+
+    def work_file(self, suffix: str) -> Path:
+        return OUTPUT_DIR / f"{self.work_prefix}_{suffix}"
+
+
+CATALOGS = {
+    "standard": CatalogConfig(
+        name="standard",
+        players_url=f"{SITE_ROOT}/efootball/players/",
+        list_params=(("availability", "standard"),),
+        chunks_dir=OUTPUT_DIR / "chunks_2027",
+        position_repair_dir=OUTPUT_DIR / "position_repair_2027",
+        state_file=DATA_DIR / "pesdb_2027_state.json",
+        previous_data_file=DATA_DIR / "pesdb_players_it.json",
+        output_stem="pesdb_players",
+        work_prefix="standard_2027",
+        scope="Standard players only",
+    ),
+    "authentic": CatalogConfig(
+        name="authentic",
+        players_url=f"{SITE_ROOT}/efootball/authentic/players/",
+        list_params=(("availability", "standard"), ("league[]", SERIE_A_LEAGUE_ID)),
+        chunks_dir=OUTPUT_DIR / "chunks_authentic_2027",
+        position_repair_dir=OUTPUT_DIR / "position_repair_authentic_2027",
+        state_file=DATA_DIR / "pesdb_authentic_state.json",
+        previous_data_file=DATA_DIR / "pesdb_authentic_it.json",
+        output_stem="pesdb_authentic",
+        work_prefix="authentic_2027",
+        scope="Serie A authentic Standard players only",
+    ),
+}
+
+
+def get_catalog_config(name: str | None) -> CatalogConfig:
+    key = (name or "standard").strip().lower()
+    if key not in CATALOGS:
+        raise ValueError(f"Unknown PESDB catalog {name!r}; expected one of {sorted(CATALOGS)}")
+    return CATALOGS[key]
+
+
+def configure_catalog(name: str | None) -> CatalogConfig:
+    """Switch the module-level paths/URLs to the requested catalogue."""
+    global CATALOG, PLAYERS_URL, CHUNKS_DIR, POSITION_REPAIR_DIR, STATE_FILE, PREVIOUS_DATA_FILE
+    CATALOG = get_catalog_config(name)
+    PLAYERS_URL = CATALOG.players_url
+    CHUNKS_DIR = CATALOG.chunks_dir
+    POSITION_REPAIR_DIR = CATALOG.position_repair_dir
+    STATE_FILE = CATALOG.state_file
+    PREVIOUS_DATA_FILE = CATALOG.previous_data_file
+    return CATALOG
+
+
+def authentic_card_image_url(player_id: str) -> str:
+    return f"{SITE_ROOT}/assets/img/card/f{player_id}authentic.png"
+
+
+def add_catalog_fields(player: dict) -> dict:
+    """Append catalogue-specific fields; standard records are left untouched."""
+    if CATALOG.name != "authentic":
+        return player
+    return {
+        **player,
+        "catalog": "authentic",
+        "card_image_url": authentic_card_image_url(final_player_id(player)),
+    }
+
+
+def position_repair_url(player_id: str, state: dict | None = None) -> str:
+    if CATALOG.name == "standard":
+        return f"{SITE_ROOT}/efootball/?id={player_id}"
+    # Authentic pages need the slug, so reuse the detail URL stored in state.
+    url = ((state or {}).get(player_id) or {}).get("url", "")
+    if not url:
+        raise RuntimeError(f"Authentic detail URL for player {player_id} missing from {STATE_FILE.name}")
+    return url
+
+
+configure_catalog(os.getenv("PESDB_CATALOG", "standard"))
 
 REQUEST_TIMEOUT = int(os.getenv("PESDB_2027_REQUEST_TIMEOUT", "30"))
 # The public search endpoint starts rate-limiting sustained fast pagination.
@@ -63,6 +166,13 @@ SITE_VALUE_ALIASES = {
     "Long Range Curler": "Tiro a Giro da Lontano",
     "Full-back Finisher": "Terzino Finalizzatore",
     "Covering Role": "Copertura",
+}
+
+# Authentic detail pages label some ability rows differently from the labels
+# the FMC rules expect. Applied only to the authentic catalogue so the
+# standard export stays byte-for-byte identical.
+AUTHENTIC_RAW_COLUMN_ALIASES = {
+    "Attacking Awareness:": "Offensive Awareness:",
 }
 
 
@@ -180,7 +290,7 @@ def discover_standard_players(
             "GET",
             PLAYERS_URL,
             max_attempts=LIST_RETRIES,
-            params={"availability": "standard", "page": page},
+            params=CATALOG.list_query(page),
         )
         soup = BeautifulSoup(response.text, "html.parser")
         total_pages = parse_page_count(soup) if total_pages is None else total_pages
@@ -391,7 +501,7 @@ def load_previous_index() -> dict[str, dict]:
 
 
 def prepare_position_repair(
-    input_file: Path = PREVIOUS_DATA_FILE,
+    input_file: Path | None = None,
     chunk_size: int = CHUNK_SIZE,
     player_limit: int | None = None,
 ) -> dict:
@@ -402,6 +512,7 @@ def prepare_position_repair(
     """
     if chunk_size < 1:
         raise ValueError("chunk_size must be at least 1")
+    input_file = input_file or PREVIOUS_DATA_FILE
     players = load_json(input_file, [])
     if player_limit is not None:
         if player_limit < 1:
@@ -435,11 +546,13 @@ def process_position_repair_chunk(chunk_index: int) -> dict:
     if not chunk_info:
         raise RuntimeError(f"Position repair chunk {chunk_index} is missing")
     player_ids = load_json(POSITION_REPAIR_DIR / chunk_info["file"], [])
+    detail_state = load_json(STATE_FILE, {}) if CATALOG.name != "standard" else {}
     session = build_session()
     updates, errors = [], []
     for offset, player_id in enumerate(player_ids, start=1):
-        url = f"{SITE_ROOT}/efootball/?id={player_id}"
+        url = ""
         try:
+            url = position_repair_url(player_id, detail_state)
             response = request_with_retry(session, "GET", url)
             fields = position_import_fields(BeautifulSoup(response.text, "html.parser"))
             if not fields["ruoli_naturali"]:
@@ -455,10 +568,12 @@ def process_position_repair_chunk(chunk_index: int) -> dict:
 
 
 def merge_position_repair(
-    input_file: Path = PREVIOUS_DATA_FILE,
-    output_file: Path = OUTPUT_DIR / "pesdb_players_it.json",
+    input_file: Path | None = None,
+    output_file: Path | None = None,
 ) -> dict:
     """Merge position-only chunks into an existing FMC JSON export."""
+    input_file = input_file or PREVIOUS_DATA_FILE
+    output_file = output_file or CATALOG.output_file("it.json")
     manifest = load_json(POSITION_REPAIR_DIR / "position_repair_manifest.json", [])
     if not manifest:
         raise RuntimeError("Position repair manifest missing")
@@ -499,13 +614,13 @@ def write_prepare_output(players: list[dict], pages: list[dict], chunk_size: int
     CHUNKS_DIR.mkdir(parents=True, exist_ok=True)
     manifest = []
     for index, chunk in enumerate(split_into_chunks(players, chunk_size)):
-        file_name = f"standard_chunk_{index:03d}.json"
+        file_name = f"{CATALOG.name}_chunk_{index:03d}.json"
         save_json(CHUNKS_DIR / file_name, chunk)
         manifest.append({"chunk_index": index, "file": file_name, "count": len(chunk)})
-    save_json(OUTPUT_DIR / "standard_2027_manifest.json", manifest)
-    save_json(OUTPUT_DIR / "standard_2027_pages.json", pages)
+    save_json(CATALOG.work_file("manifest.json"), manifest)
+    save_json(CATALOG.work_file("pages.json"), pages)
     summary = {"players": len(players), "pages": len(pages), "chunks": len(manifest), "chunk_size": chunk_size}
-    save_json(OUTPUT_DIR / "standard_2027_prepare_summary.json", summary)
+    save_json(CATALOG.work_file("prepare_summary.json"), summary)
     print(json.dumps(summary))
     return summary
 
@@ -525,7 +640,7 @@ def prepare_discovery_plan(pages_per_shard: int, max_pages: int | None = None) -
         "GET",
         PLAYERS_URL,
         max_attempts=LIST_RETRIES,
-        params={"availability": "standard", "page": 1},
+        params=CATALOG.list_query(1),
     )
     total_pages = parse_page_count(BeautifulSoup(response.text, "html.parser"))
     selected_pages = min(total_pages, max_pages) if max_pages is not None else total_pages
@@ -539,14 +654,14 @@ def prepare_discovery_plan(pages_per_shard: int, max_pages: int | None = None) -
         "pages_per_shard": pages_per_shard,
         "ranges": ranges,
     }
-    save_json(OUTPUT_DIR / "standard_2027_discovery_plan.json", plan)
+    save_json(CATALOG.work_file("discovery_plan.json"), plan)
     print(json.dumps(plan))
     return plan
 
 
 def discover_range(start_page: int, end_page: int) -> dict:
     players, pages = discover_standard_players(start_page=start_page, end_page=end_page)
-    target = OUTPUT_DIR / "discovery" / f"standard_2027_pages_{start_page:04d}_{end_page:04d}.json"
+    target = OUTPUT_DIR / "discovery" / f"{CATALOG.work_prefix}_pages_{start_page:04d}_{end_page:04d}.json"
     save_json(target, {"start_page": start_page, "end_page": end_page, "players": players, "pages": pages})
     summary = {"start_page": start_page, "end_page": end_page, "players": len(players), "pages": len(pages), "file": target.name}
     print(json.dumps(summary))
@@ -554,11 +669,11 @@ def discover_range(start_page: int, end_page: int) -> dict:
 
 
 def assemble_discovery(chunk_size: int = CHUNK_SIZE) -> dict:
-    plan = load_json(OUTPUT_DIR / "standard_2027_discovery_plan.json", None)
+    plan = load_json(CATALOG.work_file("discovery_plan.json"), None)
     if not plan:
         raise RuntimeError("2027 discovery plan missing")
     expected_ranges = {(item["start_page"], item["end_page"]) for item in plan["ranges"]}
-    source_files = sorted((OUTPUT_DIR / "discovery").glob("standard_2027_pages_*.json"))
+    source_files = sorted((OUTPUT_DIR / "discovery").glob(f"{CATALOG.work_prefix}_pages_*.json"))
     players_by_id: dict[str, dict] = {}
     pages_by_number: dict[int, dict] = {}
     found_ranges: set[tuple[int, int]] = set()
@@ -583,7 +698,7 @@ def assemble_discovery(chunk_size: int = CHUNK_SIZE) -> dict:
 
 
 def process_chunk(chunk_index: int) -> dict:
-    manifest = load_json(OUTPUT_DIR / "standard_2027_manifest.json", [])
+    manifest = load_json(CATALOG.work_file("manifest.json"), [])
     chunk_info = next(item for item in manifest if int(item["chunk_index"]) == chunk_index)
     summaries = load_json(CHUNKS_DIR / chunk_info["file"], [])
     state = load_json(STATE_FILE, {})
@@ -625,7 +740,7 @@ def process_chunk(chunk_index: int) -> dict:
 
 
 def merge() -> dict:
-    manifest = load_json(OUTPUT_DIR / "standard_2027_manifest.json", [])
+    manifest = load_json(CATALOG.work_file("manifest.json"), [])
     if not manifest:
         raise RuntimeError("2027 manifest missing")
     raw_players, cached_players, all_ids, errors, state = [], [], [], [], {}
@@ -644,11 +759,17 @@ def merge() -> dict:
     transformed = []
     if raw_players:
         raw_df = pd.DataFrame(raw_players)
+        if CATALOG.name == "authentic":
+            raw_df = raw_df.rename(columns=AUTHENTIC_RAW_COLUMN_ALIASES)
         final_df = transform_dataframe(raw_df, set(DEFAULT_EXCLUDED_COLUMNS) | excluded, custom_columns, custom_values)
         transformed = json.loads(final_df.to_json(orient="records", force_ascii=False))
     final_index = {final_player_id(player): player for player in [*transformed, *cached_players] if final_player_id(player)}
     ordered_ids = list(dict.fromkeys(all_ids))
-    final_players = [normalize_final_player_values(final_index[player_id], custom_values) for player_id in ordered_ids if player_id in final_index]
+    final_players = [
+        add_catalog_fields(normalize_final_player_values(final_index[player_id], custom_values))
+        for player_id in ordered_ids
+        if player_id in final_index
+    ]
     if len(final_players) != len(ordered_ids):
         missing = len(ordered_ids) - len(final_players)
         raise RuntimeError(f"Quality gate failed: {missing} Standard players are missing")
@@ -665,7 +786,7 @@ def merge() -> dict:
     metadata = {
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "source": "pesdb.net eFootball 2027",
-        "scope": "Standard players only",
+        "scope": CATALOG.scope,
         "players_count": len(final_players),
         "player_ids_count": len(ordered_ids),
         "missing_players_count": 0,
@@ -677,10 +798,10 @@ def merge() -> dict:
         "has_errors": bool(errors),
         **build_diff(previous, final_players),
     }
-    save_json(OUTPUT_DIR / "pesdb_players_it.json", final_players)
-    final_df.to_csv(OUTPUT_DIR / "pesdb_players_it.csv", index=False, encoding="utf-8-sig")
-    save_json(OUTPUT_DIR / "pesdb_players_meta.json", metadata)
-    save_json(OUTPUT_DIR / "pesdb_players_diff.json", build_diff(previous, final_players))
-    save_json(OUTPUT_DIR / "pesdb_2027_state.json", state)
+    save_json(CATALOG.output_file("it.json"), final_players)
+    final_df.to_csv(CATALOG.output_file("it.csv"), index=False, encoding="utf-8-sig")
+    save_json(CATALOG.output_file("meta.json"), metadata)
+    save_json(CATALOG.output_file("diff.json"), build_diff(previous, final_players))
+    save_json(OUTPUT_DIR / STATE_FILE.name, state)
     print(json.dumps({"players": len(final_players), "scraped": len(raw_players), "cached": len(cached_players), "errors": len(errors)}))
     return metadata

@@ -144,6 +144,23 @@ Il file `pesdb_players_meta.json` contiene:
 
 Questo file serve per mostrare nell'app pubblicata se il run e' andato bene.
 
+## Catalogo Authentic Serie A (2027)
+
+`scraping_pesdb_2027.py` supporta due cataloghi tramite `PESDB_CATALOG` (o `--catalog` del CLI):
+
+- `standard` (default): comportamento storico invariato;
+- `authentic`: carte authentic Serie A (`/efootball/authentic/players/?availability=standard&league[]=10`),
+  con file propri `data/pesdb_authentic_it.json/.csv`, `pesdb_authentic_meta.json`, `pesdb_authentic_diff.json`,
+  `pesdb_authentic_state.json`, `estrazione_authentic_YYYY_MM_DD.json`. Ogni record ha in piu' `catalog` e `card_image_url`.
+
+```powershell
+python pipeline_github_2027.py --catalog authentic prepare --chunk-size 75
+python pipeline_github_2027.py --catalog authentic process-chunk --chunk-index 0   # per ogni chunk
+python pipeline_github_2027.py --catalog authentic merge
+```
+
+Workflow: `.github/workflows/weekly-authentic-pesdb-2027.yml` (venerdi' 12:00 Europe/Rome). Test: `python -m unittest discover -s tests`.
+
 ## Note
 
 - Lo script salva checkpoint durante l'estrazione dettagli.

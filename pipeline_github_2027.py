@@ -1,11 +1,14 @@
 """Commands used by the staged GitHub Action for the PESDB 2027 scraper."""
 
 import argparse
+import os
 from pathlib import Path
 
 from scraping_pesdb_2027 import (
+    CATALOGS,
     CHUNK_SIZE,
     assemble_discovery,
+    configure_catalog,
     discover_range,
     merge,
     prepare,
@@ -19,6 +22,12 @@ from scraping_pesdb_2027 import (
 
 def main() -> None:
     parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--catalog",
+        choices=sorted(CATALOGS),
+        default=os.getenv("PESDB_CATALOG", "standard").strip().lower(),
+        help="PESDB catalogue to scrape (default: $PESDB_CATALOG or standard)",
+    )
     commands = parser.add_subparsers(dest="command", required=True)
     prepare_parser = commands.add_parser("prepare")
     prepare_parser.add_argument("--chunk-size", type=int, default=CHUNK_SIZE)
@@ -44,6 +53,7 @@ def main() -> None:
     repair_merge_parser.add_argument("--input", type=Path)
     repair_merge_parser.add_argument("--output", type=Path)
     args = parser.parse_args()
+    configure_catalog(args.catalog)
     if args.command == "prepare":
         prepare(chunk_size=args.chunk_size, max_pages=args.max_pages)
     elif args.command == "prepare-discovery-plan":
